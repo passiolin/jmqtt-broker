@@ -1,0 +1,205 @@
+server:
+  port: 8922
+
+spring:
+  application:
+    name: jmqtt-broker
+  jackson:
+    default-property-inclusion: non_null
+  task:
+    scheduling:
+      # 定时任务线程池至少 2 个线程: Redis 健康检查在 Redis 故障时会各等一次
+      # 命令超时(默认 1s), 若和「管理命令轮询」共用唯一线程, 管理命令会被拖慢
+      pool:
+        size: 2
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+#--------------------------------------------------------------------
+# jmqtt-broker
+#--------------------------------------------------------------------
+jmqtt:
+  broker:
+    # Broker 唯一标识, 集群模式下用于实例判断
+    id: jmqtt
+    # 监听地址, 留空表示绑定所有网卡
+    host:
+    # MQTT TCP 端口
+    port: 1883
+    # WebSocket
+    websocket-enabled: true
+    websocket-port: 8083
+    websocket-path: /mqtt
+
+    # Netty 线程
+    # boss 线程数, 默认为 1 即可
+    boss-threads: 1
+    # worker 线程数, 0 表示 2 * CPU 核数
+    worker-threads: 0
+    # 是否使用 Linux epoll 传输, 无 native 库时自动降级为 NIO
+    use-epoll: true
+
+    # TLS (Self-signed MQTTS)
+    ssl-enabled: false
+    ssl-keystore: keystore/server.pfx
+    ssl-password: changeit
+
+    # 连接认证
+    auth-enabled: true
+    auth-username: jmqtt
+    auth-password: jmqtt
+
+    # 会话
+    # 默认心跳时间(秒), 会被客户端 CONNECT 参数覆盖
+    default-keep-alive: 60
+    # cleanSession=0 的会话保留时长(秒)
+    # v5 下同时是 Session Expiry Interval 的封顶值: 客户端要得更长也只会拿到这个值,
+    # 且服务端必须把实际采用的值回在 CONNACK 里
+    session-expiry-seconds: 7200
+    # v5: 可接受的入站 topic alias 数量上限。0 = 不支持(本实现如此),
+    # 会在 CONNACK 里如实声明, 客户端看到 0 就不会使用别名
+    topic-alias-maximum: 0
+    # 服务端强制的心跳间隔(秒)。0 = 不干预, 沿用客户端协商值;
+    # 非 0 时会在 CONNACK 回 Server Keep Alive, 客户端必须遵守
+    server-keep-alive: 0
+    # 单个 clientId 允许的最大在途消息数(QoS 1/2)
+    max-inflight: 32
+    # 单客户端发送队列上限, 超出按 QoS 分级丢弃
+    max-mqueue-len: 1000
+    # 每个持久会话最多缓存多少条离线消息, 超出丢弃最旧的
+    # 0 表示不缓存离线消息(对 cleanSession=0 的客户端直接丢弃, 即 MQTT 语义上的破损)
+    max-offline-queue-len: 1000
+
+    # 集群
+    # 集群能力依赖 Kafka 总线: 打开它才会装配 KafkaClusterBus
+    cluster-enabled: false
+    kafka:
+      # 总开关。false 时装配单机总线, 消息只在本节点投递
+      enabled: false
+      bootstrap-servers: 127.0.0.1:9092
+      client-id-prefix: jmqtt
+
+      # ---- 消息面: 跨节点 pub/sub ----
+      # 广播 topic。record 的 key 是 MQTT 主题(保证分区顺序 + 携带主题)
+      cluster-topic: jmqtt-cluster
+      # 消费组。留空则自动生成为 jmqtt-<brokerId>
+      # 关键: 每个节点必须使用不同的 group.id, 否则变成组内分摊而不是广播
+      group-id:
+      # 无已提交 offset 时的起点
+      auto-offset-reset: latest
+
+      # ---- 消息面: 广播范围 ----
+      # 广播总开关。只有「其他节点上的 MQTT 订阅者也需要这条消息」时才需要广播。
+      # 如果业务上只有设备与服务端通信(设备与其他端之间走 P2P 信令), 那么让每个节点
+      # 消费全量消息就纯粹是成本 —— 关掉后本节点投递与数据面上行都不受影响。
+      # ★ 配错的后果是「跨节点消息静默不到」而不是报错, 控制台会在节点概要里显示实际形态
+      broadcast-enabled: true
+      # 只有匹配这些过滤器的主题才进集群广播; 留空 = 全部主题都广播(默认)。
+      # 混合场景示例: 只保留端间交互与下行指令, 设备上报的海量遥测就不必让 N 个节点各读一遍
+      #   broadcast-filters:
+      #     - app/+/cmd
+      #     - device/+/signal
+      broadcast-filters: []
+      # 单次 poll 的最长等待
+      poll-timeout-ms: 200
+
+      # ---- 数据面: 上行出口 ----
+      # 留空表示不开启数据面出口
+      uplink-topic: ""
+      # 哪些主题算上行; 留空表示全部消息都视为上行
+      uplink-filters: []
+      # 数据面的分区键: topic(默认, 键=主题) 或 device(键=设备标识)
+      # 遥测主题通常高度集中, 建议用 device —— 否则全部流量压进一个分区,
+      # 下游加再多消费者也只能串行读。device 模式保证每个设备自身时序有序
+      uplink-key: topic
+      # true = 命中上行过滤器的消息只走数据面, 不再进集群广播
+      # 当订阅者集中在云端(而非分布在各 broker)时置 true, 扇出从 N 倍降到 1 倍
+      uplink-exclusive: false
+
+      # ---- 生产者 ----
+      # Kafka 不可用时的最长阻塞。必须设小, 否则会卡住 MQTT 发布路径
+      max-block-ms: 1000
+      # 出站队列容量。满则丢弃并计数, 绝不阻塞本节点投递
+      queue-capacity: 100000
+      compression-type: lz4
+
+    # 会话持久化(Redis)
+    # 只存会话属性 + 订阅关系, 用于跨节点会话恢复。
+    # 绝不存放消息 —— 消息的归宿是 Kafka, 放进 Redis 等于把投递路径接到中心化存储上。
+    redis:
+      enabled: false
+      host: 127.0.0.1
+      port: 6379
+      password:
+      database: 0
+      key-prefix: jmqtt
+      # 连接建立路径上的命令超时, 必须设小
+      command-timeout-ms: 1000
+      # 健康检查间隔: 决定 Redis 故障与恢复被感知的时延
+      health-interval-ms: 5000
+
+      # 在途消息(已发未确认的 QoS 1/2)的持久化模式
+      #   off   = 不落盘(节点故障丢在途消息, 即原有行为)
+      #   sync  = 每次变更同步写 Redis。不丢, 但每条 QoS 1/2 多一次 Redis 往返, 抬高投递延迟
+      #   async = 定时批量刷盘(默认)。投递路径不等 Redis, 崩溃时丢最近一个刷盘周期
+      # 选哪个取决于 QoS 1/2 的实际占比: 从 /open/api/jmqtt/info 的 qos 段读取
+      inflight-mode: async
+      # async 模式的刷盘周期, 也就是该模式下的丢失窗口
+      inflight-flush-interval-ms: 100
+      # 待刷盘客户端数超过该值时立即触发刷盘, 防止未刷盘状态无限堆积
+      inflight-max-pending-clients: 10000
+
+    # 管理面: 把本节点的运行视图发布到 Redis, 供 jmqtt-admin 直接读取。
+    # 只发布「有哪些客户端、哪些 topic」这类观测数据, 不改动任何 MQTT 行为;
+    # 关掉它 broker 的表现与之前完全一致。
+    admin:
+      enabled: true
+      # 心跳周期。同时决定集群视图的新鲜度与判活的灵敏度
+      heartbeat-interval-ms: 5000
+      # 状态键 TTL。心跳停更后键自然过期 —— 这是「节点已消失」的唯一判据,
+      # 因此必须显著大于心跳周期(留出连续丢两次心跳的余量), 也不能太短:
+      # 一次 5 秒的 GC 停顿不该让节点被判为下线
+      state-ttl-seconds: 30
+      # 客户端状态出站队列容量。满则丢弃并计数, 绝不阻塞连接建立/断开;
+      # 丢掉的增量由后续对账(启动/Redis 重连/发现丢弃)全量纠正
+      outbox-capacity: 200000
+      # 订阅过滤器视图的重算间隔(按需触发, 订阅没变则跳过)
+      filter-publish-interval-ms: 5000
+      # 单个客户端最多带几个订阅过滤器到管理视图。护栏而非功能开关:
+      # 异常客户端可能订阅几千个过滤器, 20 万客户端原样发布就是几 GB
+      max-filters-per-client: 16
+      # ★ 单次驱逐的硬上限。这是安全阀不是性能参数 ——
+      # 关连接必然触发遗嘱发布, 一次性驱逐十万客户端等于制造十万条遗嘱风暴,
+      # 而设备并没有真的下线。强制「驱逐必须分批慢慢做」
+      max-evict-per-task: 5000
+      default-evict-batch-size: 200
+      # 批次间隔下限, 防止把间隔设成 0 变成一次性全量断连
+      min-evict-interval-ms: 50
+      # 命令队列轮询间隔(非阻塞轮询: 阻塞式 BRPOP 会占住共享连接)
+      command-poll-interval-ms: 500
+      # 命令最大容忍年龄。超龄命令一律拒绝执行 ——
+      # 一条一小时后才被执行的驱逐命令, 打的流量形态已完全不同
+      command-max-age-ms: 60000
+      command-result-ttl-seconds: 3600
+
+    # 网络参数
+    so-backlog: 511
+    so-keep-alive: true
+    tcp-no-delay: true
+    # 单条报文最大长度, 默认 10MB
+    max-payload-size: 10485760
+    # 写缓冲水位线, 用于背压判断
+    write-buffer-low-water-mark: 32768
+    write-buffer-high-water-mark: 65536
+
+logging:
+  level:
+    root: INFO
+    online.ipuff.jmqtt: DEBUG
