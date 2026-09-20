@@ -1,0 +1,2 @@
+# build.sh 暂存的构建产物, 不入库
+app.jar

@@ -1,0 +1,30 @@
+# 用法: 在本目录执行 docker compose up -d
+# 镜像由 build.sh 产出; 本文件只负责运行参数。
+services:
+  jmqtt-broker:
+    image: jmqtt-broker:latest
+    container_name: jmqtt-broker
+    restart: unless-stopped
+    ports:
+      # 生产环境: 这两个端口由 LB 终结 TLS(MQTTS 8883 / WSS 443)后转发过来,
+      # 不直接暴露公网。单机自用可改成 "127.0.0.1:1883:1883"。
+      - "1883:1883"          # MQTT/TCP
+      - "8083:8083"          # MQTT/WebSocket
+      # HTTP API 与健康检查只绑本机; 需要远程访问走 SSH 隧道或内网
+      - "127.0.0.1:8922:8922"
+    environment:
+      TZ: Asia/Shanghai
+      # 镜像内已带同样的默认值, 这里显式写出便于按需调整
+      JAVA_OPTS: "-XX:MaxRAMPercentage=75.0 -XX:+ExitOnOutOfMemoryError"
+      # 配置覆盖走 Spring Boot 松散绑定: JMQTT_BROKER_XXX -> jmqtt.broker.xxx
+      # 常用项(按需取消注释):
+      # JMQTT_BROKER_ID: node-1                       # 多节点部署时每个节点不同
+      # JMQTT_BROKER_AUTH_ENABLED: "false"
+      # JMQTT_BROKER_AUTH_PASSWORD: "sha256:<hex>"
+      # JMQTT_BROKER_CLUSTER_ENABLED: "true"
+      # JMQTT_BROKER_KAFKA_ENABLED: "true"
+      # JMQTT_BROKER_KAFKA_BOOTSTRAP_SERVERS: "10.0.0.5:9092"
+      # JMQTT_BROKER_REDIS_ENABLED: "true"
+      # JMQTT_BROKER_REDIS_HOST: "10.0.0.6"
+    mem_limit: 1g
+    # healthcheck 已在镜像里定义(对 1883 建 TCP 连接), 无需重复声明
