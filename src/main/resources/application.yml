@@ -140,6 +140,12 @@ jmqtt:
       # 单次 poll 的最长等待
       poll-timeout-ms: 200
 
+      # 集群消费并行度(worker 数), 默认 1 = 串行消费。
+      # 记录按分区哈希到固定 worker; 广播 key 恒为 MQTT 主题(同主题必落同分区),
+      # 因此并行只发生在不同分区之间, 同主题仍然严格有序。
+      # 有效上限 = topic 分区数
+      consumer-threads: 1
+
       # ---- 数据面: 上行出口 ----
       # 留空表示不开启数据面出口
       uplink-topic: ""

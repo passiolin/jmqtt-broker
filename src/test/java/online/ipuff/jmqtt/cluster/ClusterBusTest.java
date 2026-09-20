@@ -375,7 +375,7 @@ class ClusterBusTest {
                         new ClusterRecords.Takeover("device-42", "node-old", "node-new")));
 
         assertEquals(ClusterRecords.Kind.TAKEOVER, ClusterRecords.kind(record));
-        assertEquals("device-42", record.key(), "key 用 clientId, 与其普通消息保持同一 partition");
+        assertEquals("device-42", record.key(), "key 用 clientId: 同一客户端的接管指令按序生效");
 
         ClusterRecords.Takeover takeover = ClusterRecords.takeover(record);
         assertNotNull(takeover);
@@ -508,6 +508,7 @@ class ClusterBusTest {
                 1000,
                 1000,
                 200,
+                1,
                 "none",
                 "latest",
                 uplinkKey);
@@ -530,6 +531,7 @@ class ClusterBusTest {
                 1000,
                 1000,
                 200,
+                1,
                 "none",
                 "latest",
                 "topic");

@@ -157,6 +157,7 @@ class BroadcastPolicyTest {
                 1000,
                 1000,
                 200,
+                1,
                 "none",
                 "latest",
                 "topic");

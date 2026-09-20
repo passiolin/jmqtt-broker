@@ -16,6 +16,7 @@
 package online.ipuff.jmqtt.config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.DefaultValue;
 import org.springframework.validation.annotation.Validated;
 
 import javax.validation.constraints.Min;
@@ -147,6 +148,11 @@ public record BrokerProperties(
      *                         否则 Kafka 故障会直接卡住 MQTT 发布路径
      * @param queueCapacity    出站队列容量。队列满时丢弃并计数 ——
      *                         宁可丢跨节点消息, 也不能阻塞本节点投递
+     * @param consumerThreads  集群消费并行度(worker 数)。记录按<b>分区</b>哈希到固定
+     *                         worker —— 由于广播 record 的 key 恒为 MQTT 主题(同主题必落
+     *                         同分区), 同主题的消息仍严格有序, 并行只发生在不同分区之间。
+     *                         默认 1(即串行消费, 与历史行为一致); 消费跟不上时调大,
+     *                         有效上限是 topic 的分区数
      * @param compressionType  压缩算法, 如 lz4 / snappy / zstd / none
      * @param autoOffsetReset  无已提交 offset 时的起点, latest 或 earliest
      */
@@ -164,6 +170,7 @@ public record BrokerProperties(
             @Min(0) int maxBlockMs,
             @Min(1) int queueCapacity,
             @Min(1) int pollTimeoutMs,
+            @DefaultValue("1") @Min(1) int consumerThreads,
             String compressionType,
             String autoOffsetReset,
             String uplinkKey

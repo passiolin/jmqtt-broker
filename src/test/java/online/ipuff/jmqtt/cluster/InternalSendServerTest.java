@@ -319,7 +319,7 @@ class InternalSendServerTest {
         BrokerProperties.KafkaProperties kafka = new BrokerProperties.KafkaProperties(
                 false, "127.0.0.1:9092", "jmqtt", "jmqtt-cluster", null,
                 true, List.of(),
-                "", List.of(), false, 1000, 1000, 200, "none", "latest", "topic");
+                "", List.of(), false, 1000, 1000, 200, 1, "none", "latest", "topic");
         BrokerProperties.RedisProperties redis = new BrokerProperties.RedisProperties(
                 false, "127.0.0.1", 6379, null, 0, "jmqtt", 1000, 5000, "off", 100, 10000);
         return new BrokerProperties(

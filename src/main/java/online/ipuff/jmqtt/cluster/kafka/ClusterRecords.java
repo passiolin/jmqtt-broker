@@ -146,8 +146,8 @@ public final class ClusterRecords {
     /**
      * 编码连接接管指令。
      *
-     * <p>key 用 clientId —— 保持同一客户端的控制消息落在同一 partition,
-     * 与它的普通消息顺序一致。
+     * <p>key 用 clientId —— 同一客户端的多次接管指令落在同一分区, 按序生效。
+     * (普通消息按约定以 MQTT 主题为 key, 控制指令与数据消息之间没有顺序要求。)
      */
     public static ProducerRecord<String, byte[]> takeoverRecord(String kafkaTopic, Takeover takeover) {
         ProducerRecord<String, byte[]> record =
