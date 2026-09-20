@@ -51,6 +51,41 @@ jmqtt:
     auth-username: jmqtt
     auth-password: jmqtt
 
+    # HTTP 认证中心(EMQX 契约)。开启后 CONNECT 的认证 POST 给外部服务:
+    #   请求  {"clientid","username","password","peerhost"} (password 按 password-hash 以明文/sha256 发送)
+    #   响应  {"result":"allow"|"deny"|"ignore", "superuser":true?}
+    # ignore/故障(on-error=ignore)回落到上面的内置静态鉴权 —— 即认证链 [http, 内置]。
+    # superuser=true 的连接后续跳过全部 ACL 检查。
+    # 认证是连接建立路径, request-timeout 必须设小; 故障后进入 cooldown 熔断
+    http-auth:
+      enabled: false
+      # url: http://auth-center:8080/mqtt/auth
+      method: post
+      request-timeout-ms: 2000
+      connect-timeout-ms: 2000
+      # plain = 明文(认证服务侧可用任意算法校验) / sha256 = 摘要, 明文不出 broker
+      password-hash: plain
+      # 故障策略: reject(默认 fail-closed) / ignore(回落内置静态鉴权)
+      on-error: reject
+      cooldown-ms: 5000
+
+    # HTTP ACL 授权(EMQX 契约)。开启后每次订阅(逐过滤器)/每条 PUBLISH 前询问:
+    #   请求  {"clientid","username","peerhost","action":"publish|subscribe","topic"}
+    #   响应  {"result":"allow"|"deny"|"ignore"}
+    # 决策带缓存(默认 60s / 每客户端 32 条 LRU), 缓存命中零 HTTP 调用;
+    # 挂起期间同连接报文按序排队。superuser 连接整体跳过。
+    http-acl:
+      enabled: false
+      # url: http://auth-center:8080/mqtt/acl
+      method: post
+      request-timeout-ms: 2000
+      connect-timeout-ms: 2000
+      cache-ttl-seconds: 60
+      cache-max-entries-per-client: 32
+      # ignore 与故障的策略: deny(默认 fail-closed) / allow
+      on-fail: deny
+      cooldown-ms: 5000
+
     # 会话
     # 默认心跳时间(秒), 会被客户端 CONNECT 参数覆盖
     default-keep-alive: 60

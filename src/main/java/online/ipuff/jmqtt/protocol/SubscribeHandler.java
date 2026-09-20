@@ -10,6 +10,8 @@
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 package online.ipuff.jmqtt.protocol;
 
@@ -17,6 +19,8 @@ import io.netty.channel.Channel;
 import io.netty.handler.codec.mqtt.MqttSubscribeMessage;
 import io.netty.handler.codec.mqtt.MqttSubscriptionOption;
 import io.netty.handler.codec.mqtt.MqttTopicSubscription;
+import online.ipuff.jmqtt.authz.AclGate;
+import online.ipuff.jmqtt.authz.IAclService;
 import online.ipuff.jmqtt.handler.ChannelAttributes;
 import online.ipuff.jmqtt.message.DupPublishMessageStore;
 import online.ipuff.jmqtt.message.RetainMessageStore;
@@ -34,17 +38,20 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 /**
  * SUBSCRIBE 处理。
  *
- * <h2>两处容易做错的地方</h2>
+ * <h2>三处容易做错的地方</h2>
  * <ol>
  *   <li><b>失败码要逐项返回。</b>一个过滤器非法就把整条连接关掉, 是过重的处置:
  *       规范允许在 SUBACK 里为每个过滤器单独返回失败码, 同一连接上可能存在别的正常订阅。
- *       这里逐项处理 —— v5 还提供了细分原因码(0x8F 过滤器非法 / 0x9E 不支持共享订阅),
- *       更不该升级成连接级事件。</li>
+ *       这里逐项处理 —— v5 还提供了细分原因码(0x8F 过滤器非法 / 0x9E 不支持共享订阅 /
+ *       0x87 ACL 拒绝), 更不该升级成连接级事件。</li>
+ *   <li><b>ACL 判定是异步的, SUBACK 必须等全部过滤器的判定完成。</b>判定期间该连接的
+ *       后续报文经 {@link AclGate} 按序排队; 全部命中缓存时同步完成, 零挂起。</li>
  *   <li><b>保留消息的 retain 标志。</b>规范要求「因新订阅而投递的保留消息」
  *       必须置 {@code retain=1}, 否则客户端无法区分「这是历史状态」还是「这是一条新消息」,
  *       在状态类主题上会做出错误判断。</li>
@@ -60,17 +67,20 @@ public class SubscribeHandler {
     private final IMessageIdService messageIdService;
     private final IDupPublishMessageStoreService dupPublishMessageStoreService;
     private final SessionPersistence sessionPersistence;
+    private final IAclService aclService;
 
     public SubscribeHandler(ISubscribeStoreService subscribeStoreService,
                             IRetainMessageStoreService retainMessageStoreService,
                             IMessageIdService messageIdService,
                             IDupPublishMessageStoreService dupPublishMessageStoreService,
-                            SessionPersistence sessionPersistence) {
+                            SessionPersistence sessionPersistence,
+                            IAclService aclService) {
         this.subscribeStoreService = subscribeStoreService;
         this.retainMessageStoreService = retainMessageStoreService;
         this.messageIdService = messageIdService;
         this.dupPublishMessageStoreService = dupPublishMessageStoreService;
         this.sessionPersistence = sessionPersistence;
+        this.aclService = aclService;
     }
 
     public void processSubscribe(Channel channel, MqttSubscribeMessage msg) {
@@ -82,17 +92,17 @@ public class SubscribeHandler {
         }
 
         boolean v5 = ReplyFactory.isV5(channel);
+        int messageId = msg.variableHeader().messageId();
         // 一次性取出该客户端现有的过滤器: v5 的 Retain Handling=1 需要判断「本次是否新订阅」
         Set<String> existingFilters = subscribeStoreService.subscriptionsOf(clientId).stream()
                 .map(SubscribeStore::topicFilter)
                 .collect(Collectors.toSet());
-        List<Integer> grantedQos = new ArrayList<>(subscriptions.size());
-        List<MqttTopicSubscription> accepted = new ArrayList<>(subscriptions.size());
-        List<Boolean> sendRetain = new ArrayList<>(subscriptions.size());
 
-        for (MqttTopicSubscription subscription : subscriptions) {
-            String topicFilter = subscription.topicName();
-            int qos = subscription.qualityOfService().value();
+        // 第一遍(同步): 静态校验; codes[i] 为 null 表示「待 ACL/可接受」, 非 null 为失败码
+        Integer[] codes = new Integer[subscriptions.size()];
+        List<Integer> aclPending = new ArrayList<>();
+        for (int i = 0; i < subscriptions.size(); i++) {
+            String topicFilter = subscriptions.get(i).topicName();
 
             // 共享订阅($share/{group}/{filter})能把消息分摊到多个订阅者。
             // 我们不支持, 而 $share/... 恰好是一个语法合法的过滤器 —— 若照常接受,
@@ -100,38 +110,112 @@ public class SubscribeHandler {
             // 表现为静默丢消息。v5 有专用原因码, 必须明确拒绝。
             if (topicFilter != null && topicFilter.startsWith("$share/")) {
                 log.debug("不支持共享订阅, clientId={} topicFilter={}", clientId, topicFilter);
-                grantedQos.add(v5 ? ReplyFactory.SHARED_SUBSCRIPTIONS_NOT_SUPPORTED
-                        : ReplyFactory.V3_SUBSCRIBE_FAILURE);
+                codes[i] = v5 ? ReplyFactory.SHARED_SUBSCRIPTIONS_NOT_SUPPORTED
+                        : ReplyFactory.V3_SUBSCRIBE_FAILURE;
                 continue;
             }
 
             if (!MqttTopic.isValidFilter(topicFilter)) {
                 log.debug("非法主题过滤器, clientId={} topicFilter={}", clientId, topicFilter);
                 // 失败码按版本选: v3.1.1 只有 0x80, v5 有专门的「过滤器非法」0x8F
-                grantedQos.add(v5 ? ReplyFactory.TOPIC_FILTER_INVALID : ReplyFactory.V3_SUBSCRIBE_FAILURE);
+                codes[i] = v5 ? ReplyFactory.TOPIC_FILTER_INVALID : ReplyFactory.V3_SUBSCRIBE_FAILURE;
                 continue;
             }
 
+            aclPending.add(i);
+        }
+
+        // superuser / 全部过滤器已在静态校验拒绝 → 无 ACL 待判定, 直接走同步路径
+        if (aclPending.isEmpty()
+                || Boolean.TRUE.equals(channel.attr(ChannelAttributes.SUPERUSER).get())) {
+            acceptSubscriptions(channel, clientId, v5, messageId, subscriptions, codes, existingFilters);
+            return;
+        }
+
+        gateOf(channel).offer(channel, () -> checkThenAccept(
+                channel, clientId, v5, messageId, subscriptions, codes, existingFilters, aclPending));
+    }
+
+    /**
+     * 门内执行: 对全部待判定过滤器发 ACL 检查(缓存命中的同步完成),
+     * 全部完成后合并结果并回 SUBACK。异步结果 hop 回连接的 EventLoop。
+     */
+    private void checkThenAccept(Channel channel, String clientId, boolean v5, int messageId,
+                                 List<MqttTopicSubscription> subscriptions, Integer[] codes,
+                                 Set<String> existingFilters, List<Integer> aclPending) {
+        AclGate gate = channel.attr(ChannelAttributes.ACL_GATE).get();
+        String username = channel.attr(ChannelAttributes.USERNAME).get();
+        String peerhost = ChannelAttributes.peerhostOf(channel);
+
+        @SuppressWarnings("unchecked")
+        CompletableFuture<Boolean>[] checks = aclPending.stream()
+                .map(i -> aclService.check(clientId, username, peerhost,
+                        "subscribe", subscriptions.get(i).topicName()))
+                .toArray(CompletableFuture[]::new);
+
+        Runnable finish = () -> {
+            for (int k = 0; k < aclPending.size(); k++) {
+                int idx = aclPending.get(k);
+                if (!join(checks[k])) {
+                    log.debug("订阅被 ACL 拒绝 clientId={} topicFilter={}",
+                            clientId, subscriptions.get(idx).topicName());
+                    codes[idx] = v5 ? ReplyFactory.NOT_AUTHORIZED : ReplyFactory.V3_SUBSCRIBE_FAILURE;
+                }
+            }
+            acceptSubscriptions(channel, clientId, v5, messageId, subscriptions, codes, existingFilters);
+            gate.release();
+        };
+
+        boolean allDone = true;
+        for (CompletableFuture<Boolean> check : checks) {
+            allDone &= check.isDone();
+        }
+        if (allDone) {
+            finish.run();
+            return;
+        }
+        CompletableFuture.allOf(checks)
+                .whenComplete((r, e) -> channel.eventLoop().execute(finish));
+    }
+
+    private static boolean join(CompletableFuture<Boolean> future) {
+        try {
+            return Boolean.TRUE.equals(future.join());
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
+     * 第二遍: 按逐项结果接受订阅、回 SUBACK、投递保留消息。
+     */
+    private void acceptSubscriptions(Channel channel, String clientId, boolean v5, int messageId,
+                                     List<MqttTopicSubscription> subscriptions, Integer[] codes,
+                                     Set<String> existingFilters) {
+        List<Integer> grantedQos = new ArrayList<>(subscriptions.size());
+        List<MqttTopicSubscription> accepted = new ArrayList<>(subscriptions.size());
+        List<Boolean> sendRetain = new ArrayList<>(subscriptions.size());
+
+        for (int i = 0; i < subscriptions.size(); i++) {
+            if (codes[i] != null) {
+                grantedQos.add(codes[i]);
+                continue;
+            }
+            MqttTopicSubscription subscription = subscriptions.get(i);
+            String topicFilter = subscription.topicName();
+            int qos = subscription.qualityOfService().value();
             MqttSubscriptionOption option = subscription.option();
-            boolean alreadySubscribed = existingFilters.contains(topicFilter);
 
             subscribeStoreService.put(new SubscribeStore(clientId, topicFilter, qos));
             // 只有需要保留的会话才真正落盘, 判断集中在 SessionPersistence 里
             sessionPersistence.subscriptionAdded(clientId, topicFilter, qos);
             grantedQos.add(qos);
             accepted.add(subscription);
-            sendRetain.add(shouldSendRetain(option, alreadySubscribed));
+            sendRetain.add(shouldSendRetain(option, existingFilters.contains(topicFilter)));
         }
 
-        // 即使全部过滤器都非法也<b>不断连接</b>, 只回逐项失败码。
-        //
-        // 这里原先会在「全量非法」时 close channel, 理由是「通常意味着客户端异常」。
-        // 但 v5 专门为此提供了细分的订阅失败码(0x8F 过滤器非法 / 0x9E 不支持共享订阅 …),
-        // 其设计意图正是让客户端能<b>逐项</b>知道问题出在哪, 而不必拆掉整条连接 ——
-        // 断了连接, 客户端就拿不到 SUBACK, 只能看到一次莫名其妙的断开。
-        // 订阅失败本来也不该升级成连接级事件: 同一连接上可能有别的正常订阅,
-        // 而且 v3.1.1 的规范同样只要求「为每个过滤器回一个返回码」。
-        channel.writeAndFlush(ReplyFactory.subAck(channel, msg.variableHeader().messageId(), grantedQos));
+        // 即使全部过滤器都失败也<b>不断连接</b>, 只回逐项失败码 —— 与静态校验同一口径。
+        channel.writeAndFlush(ReplyFactory.subAck(channel, messageId, grantedQos));
 
         // 投递命中的保留消息
         for (int i = 0; i < accepted.size(); i++) {
@@ -191,5 +275,14 @@ public class SubscribeHandler {
         }
         channel.flush();
         log.debug("投递保留消息 clientId={} topicFilter={} 数量={}", clientId, topicFilter, retains.size());
+    }
+
+    private static AclGate gateOf(Channel channel) {
+        AclGate gate = channel.attr(ChannelAttributes.ACL_GATE).get();
+        if (gate == null) {
+            gate = new AclGate();
+            channel.attr(ChannelAttributes.ACL_GATE).set(gate);
+        }
+        return gate;
     }
 }

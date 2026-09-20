@@ -16,12 +16,12 @@ package online.ipuff.jmqtt.auth;
 import online.ipuff.jmqtt.config.BrokerProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * 基于配置的认证实现。
@@ -39,10 +39,9 @@ import java.util.HexFormat;
  *
  * <p>生成摘要: {@code java -cp jmqtt-broker.jar online.ipuff.jmqtt.auth.util.PwdUtil <明文>}
  *
- * <p>生产环境请替换为对接设备库 / LDAP / HTTP 认证中心的实现 —— 接入点只有
- * {@link IAuthService} 这一个接口。
+ * <p>生产环境可切换为 HTTP 认证中心(EMQX 契约, {@link HttpAuthService})——
+ * 装配见 {@link AuthConfig}, 认证失败/超时还可按策略回落到本实现(认证链)。
  */
-@Service
 public class AuthService implements IAuthService {
 
     private static final Logger log = LoggerFactory.getLogger(AuthService.class);
@@ -56,7 +55,14 @@ public class AuthService implements IAuthService {
     }
 
     @Override
-    public boolean checkValid(String username, String password) {
+    public CompletableFuture<AuthResult> authenticate(String clientId, String username,
+                                                      String password, String peerhost) {
+        // 内置鉴权没有外部调用, 必须立即完成 —— 调用方据此走同步内联路径
+        return CompletableFuture.completedFuture(
+                checkValid(username, password) ? AuthResult.ALLOW : AuthResult.DENY);
+    }
+
+    private boolean checkValid(String username, String password) {
         if (!properties.authEnabled()) {
             return true;
         }

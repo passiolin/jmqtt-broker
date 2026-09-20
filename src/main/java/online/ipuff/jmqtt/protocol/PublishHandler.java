@@ -10,6 +10,8 @@
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 package online.ipuff.jmqtt.protocol;
 
@@ -18,6 +20,8 @@ import io.netty.channel.Channel;
 import io.netty.handler.codec.mqtt.MqttProperties;
 import io.netty.handler.codec.mqtt.MqttPublishMessage;
 import io.netty.handler.codec.mqtt.MqttQoS;
+import online.ipuff.jmqtt.authz.AclGate;
+import online.ipuff.jmqtt.authz.IAclService;
 import online.ipuff.jmqtt.cluster.InternalCommunication;
 import online.ipuff.jmqtt.cluster.InternalMessage;
 import online.ipuff.jmqtt.cluster.InternalSendServer;
@@ -31,19 +35,28 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.util.concurrent.CompletableFuture;
+
 /**
  * PUBLISH 处理。
  *
  * <p>流程:
  * <ol>
+ *   <li>静态校验(topic alias / 主题名合法性), 同步完成</li>
+ *   <li>ACL 判定(启用且非 superuser 时): 走 {@link AclGate} 串行门,
+ *       判定挂起期间同连接后续 PUBLISH 按序排队 —— MQTT 要求同一连接保序,
+ *       这也是拒绝语义能按序回 PUBACK 的前提。superuser / ACL 关闭 / 缓存命中
+ *       时同步内联, 不付任何挂起成本</li>
  *   <li>本地投递(内存主题树匹配, 零外部调用)</li>
  *   <li>出站到集群总线(启用时)</li>
  *   <li>按 QoS 回 PUBACK / PUBREC</li>
  *   <li>处理 retain 标志</li>
  * </ol>
  *
- * <p><b>投递路径上不做任何外部调用。</b>本地投递全部交给 {@link InternalSendServer},
- * 在那里一次拿到订阅者列表、一次拿到 Channel; QoS 用参数表达而不是按 QoS 复制三份逻辑。
+ * <p><b>投递路径上不做任何外部调用。</b>ACL 检查发生在进入投递<b>之前</b>,
+ * 且带决策缓存 —— 稳态(缓存命中)下依然零外部调用。本地投递全部交给
+ * {@link InternalSendServer}, 在那里一次拿到订阅者列表、一次拿到 Channel;
+ * QoS 用参数表达而不是按 QoS 复制三份逻辑。
  */
 @Component
 public class PublishHandler {
@@ -55,17 +68,28 @@ public class PublishHandler {
     private final IRetainMessageStoreService retainMessageStoreService;
     private final QosMetrics qosMetrics;
     private final IInboundQos2Store inboundQos2Store;
+    private final IAclService aclService;
 
     public PublishHandler(InternalCommunication internalCommunication,
                           InternalSendServer internalSendServer,
                           IRetainMessageStoreService retainMessageStoreService,
                           QosMetrics qosMetrics,
-                          IInboundQos2Store inboundQos2Store) {
+                          IInboundQos2Store inboundQos2Store,
+                          IAclService aclService) {
         this.internalCommunication = internalCommunication;
         this.internalSendServer = internalSendServer;
         this.retainMessageStoreService = retainMessageStoreService;
         this.qosMetrics = qosMetrics;
         this.inboundQos2Store = inboundQos2Store;
+        this.aclService = aclService;
+    }
+
+    /**
+     * 一条 PUBLISH 的快照。进入异步门之前从报文里取出 ——
+     * {@code SimpleChannelInboundHandler} 在 channelRead0 返回后释放原始报文。
+     */
+    private record PublishContext(String clientId, String topic, int qos,
+                                  int packetId, boolean retain, byte[] payload) {
     }
 
     public void processPublish(Channel channel, MqttPublishMessage msg) {
@@ -80,7 +104,7 @@ public class PublishHandler {
         if (v5 && msg.variableHeader().properties() != null
                 && msg.variableHeader().properties().getProperty(
                         MqttProperties.MqttPropertyType.TOPIC_ALIAS.value()) != null) {
-            log.warn("v5 客户端使用了未协商的 topic alias, clientId={}, 按协议错误断开", clientId);
+            log.warn("v5 客户端使用了未协商的 topic alias, clientId={} 按协议错误断开", clientId);
             ReplyFactory.closeWithReason(channel, ReplyFactory.PROTOCOL_ERROR);
             return;
         }
@@ -96,7 +120,77 @@ public class PublishHandler {
             return;
         }
 
-        int packetId = msg.variableHeader().packetId();
+        PublishContext context = new PublishContext(clientId, topic, qos,
+                msg.variableHeader().packetId(), msg.fixedHeader().isRetain(),
+                ByteBufUtil.getBytes(msg.payload()));
+
+        // superuser 认证时已授予, 整体跳过 ACL —— 连门都不进, 零开销
+        if (Boolean.TRUE.equals(channel.attr(ChannelAttributes.SUPERUSER).get())) {
+            doPublish(channel, context);
+            return;
+        }
+
+        gateOf(channel).offer(channel, () -> checkThenPublish(channel, context));
+    }
+
+    /**
+     * 门内执行: 查 ACL(缓存命中同步完成), 按结果投递或拒绝。
+     * 异步结果必须 hop 回连接的 EventLoop 再处理, 然后释放门驱动下一条。
+     */
+    private void checkThenPublish(Channel channel, PublishContext context) {
+        AclGate gate = channel.attr(ChannelAttributes.ACL_GATE).get();
+        CompletableFuture<Boolean> check = aclService.check(
+                context.clientId(),
+                channel.attr(ChannelAttributes.USERNAME).get(),
+                ChannelAttributes.peerhostOf(channel),
+                "publish", context.topic());
+        if (check.isDone()) {
+            applyPublishDecision(channel, context, join(check));
+            gate.release();
+            return;
+        }
+        check.whenComplete((allowed, error) -> channel.eventLoop().execute(() -> {
+            applyPublishDecision(channel, context, error == null && Boolean.TRUE.equals(allowed));
+            gate.release();
+        }));
+    }
+
+    private static boolean join(CompletableFuture<Boolean> future) {
+        try {
+            return Boolean.TRUE.equals(future.join());
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
+     * 拒绝语义按版本区分: v5 有逐条错误通道, 回 PUBACK/PUBREC 0x87
+     * (带错误码的 PUBREC 会同时释放报文标识符, 客户端不再走 PUBREL);
+     * v3 没有 —— 静默丢弃并记日志, 不关连接(那只会制造重连风暴)。
+     */
+    private void applyPublishDecision(Channel channel, PublishContext context, boolean allowed) {
+        if (!allowed) {
+            log.warn("PUBLISH 被 ACL 拒绝 clientId={} topic={} qos={}",
+                    context.clientId(), context.topic(), context.qos());
+            if (ReplyFactory.isV5(channel)) {
+                if (context.qos() == MqttQoS.AT_LEAST_ONCE.value()) {
+                    channel.writeAndFlush(ReplyFactory.pubAck(
+                            channel, context.packetId(), ReplyFactory.NOT_AUTHORIZED));
+                } else if (context.qos() == MqttQoS.EXACTLY_ONCE.value()) {
+                    channel.writeAndFlush(ReplyFactory.pubRec(
+                            channel, context.packetId(), ReplyFactory.NOT_AUTHORIZED));
+                }
+            }
+            return;
+        }
+        doPublish(channel, context);
+    }
+
+    private void doPublish(Channel channel, PublishContext msg) {
+        String clientId = msg.clientId();
+        String topic = msg.topic();
+        int qos = msg.qos();
+        int packetId = msg.packetId();
 
         // QoS 2 的接收方向去重。必须在投递<b>之前</b>判断, 否则去重就没有意义了。
         //
@@ -120,8 +214,7 @@ public class PublishHandler {
             }
         }
 
-        // 必须复制: SimpleChannelInboundHandler 会在 channelRead0 返回后释放报文
-        byte[] payload = ByteBufUtil.getBytes(msg.payload());
+        byte[] payload = msg.payload();
         qosMetrics.published(qos);
 
         // 投递给本地订阅者时 retain 置 false ——
@@ -147,7 +240,7 @@ public class PublishHandler {
         }
 
         // retain 处理
-        if (msg.fixedHeader().isRetain()) {
+        if (msg.retain()) {
             if (payload.length == 0) {
                 retainMessageStoreService.remove(topic);
             } else {
@@ -159,5 +252,14 @@ public class PublishHandler {
             log.debug("PUBLISH clientId={} topic={} qos={} size={} 本地投递={}",
                     clientId, topic, qos, payload.length, delivered);
         }
+    }
+
+    private static AclGate gateOf(Channel channel) {
+        AclGate gate = channel.attr(ChannelAttributes.ACL_GATE).get();
+        if (gate == null) {
+            gate = new AclGate();
+            channel.attr(ChannelAttributes.ACL_GATE).set(gate);
+        }
+        return gate;
     }
 }

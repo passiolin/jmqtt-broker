@@ -14,6 +14,8 @@
 package online.ipuff.jmqtt;
 
 import online.ipuff.jmqtt.admin.AdminProperties;
+import online.ipuff.jmqtt.auth.HttpAuthProperties;
+import online.ipuff.jmqtt.authz.HttpAclProperties;
 import online.ipuff.jmqtt.config.BrokerProperties;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -35,7 +37,8 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @EnableAsync
 @EnableScheduling
 @SpringBootApplication
-@EnableConfigurationProperties({BrokerProperties.class, AdminProperties.class})
+@EnableConfigurationProperties({BrokerProperties.class, AdminProperties.class,
+        HttpAuthProperties.class, HttpAclProperties.class})
 public class JmqttBrokerApplication {
 
     public static void main(String[] args) {

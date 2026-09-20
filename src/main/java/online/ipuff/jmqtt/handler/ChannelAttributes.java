@@ -13,6 +13,7 @@
  */
 package online.ipuff.jmqtt.handler;
 
+import io.netty.channel.Channel;
 import io.netty.handler.codec.mqtt.MqttVersion;
 import io.netty.util.AttributeKey;
 import online.ipuff.jmqtt.protocol.ConnectOptions;
@@ -86,6 +87,50 @@ public final class ChannelAttributes {
      */
     public static final AttributeKey<Boolean> SUPPRESS_WILL =
             AttributeKey.valueOf("jmqtt.suppressWill");
+
+    /**
+     * HTTP 鉴权返回 {@code superuser=true} 时置位。
+     *
+     * <p>EMQX 语义: 超级用户跳过后续全部 ACL 检查。默认<b>不设置</b>(即普通连接,
+     * 每次订阅/发布照常走 ACL)。认证链上只有认证服务能授予它, 配置改不出来。
+     */
+    public static final AttributeKey<Boolean> SUPERUSER = AttributeKey.valueOf("jmqtt.superuser");
+
+    /**
+     * CONNECT 认证挂起中(HTTP 鉴权等待外部响应)。
+     *
+     * <p>置位期间入口忽略该连接上的一切后续报文: 规范要求客户端必须等 CONNACK,
+     * 此时到来的任何报文都是异常流量, 而且连接状态尚未初始化, 处理它们必然读到空值。
+     * 认证结束(无论放行/拒绝/连接已断)即清除。
+     */
+    public static final AttributeKey<Boolean> AUTH_PENDING = AttributeKey.valueOf("jmqtt.authPending");
+
+    /**
+     * CONNECT 认证通过后写入的用户名(可能为 null)。
+     *
+     * <p>ACL 请求要带上它 —— 授权服务普遍按用户/角色放行, 只有 clientId 不够用。
+     */
+    public static final AttributeKey<String> USERNAME = AttributeKey.valueOf("jmqtt.username");
+
+    /**
+     * 每连接的 ACL 串行门(懒创建, 见 {@code PublishHandler}/{@code SubscribeHandler})。
+     *
+     * <p>ACL 判定挂起期间后续报文按序排队, 保住同一连接的报文顺序。
+     */
+    public static final AttributeKey<online.ipuff.jmqtt.authz.AclGate> ACL_GATE =
+            AttributeKey.valueOf("jmqtt.aclGate");
+
+    /**
+     * 对端 IP, 供 HTTP 认证/ACL 服务按来源网段判定。
+     * 非 InetSocketAddress(如测试通道)时退化为字符串描述, 可能为 null。
+     */
+    public static String peerhostOf(Channel channel) {
+        java.net.SocketAddress remote = channel.remoteAddress();
+        if (remote instanceof java.net.InetSocketAddress address && address.getAddress() != null) {
+            return address.getAddress().getHostAddress();
+        }
+        return remote == null ? null : remote.toString();
+    }
 
     private ChannelAttributes() {
     }

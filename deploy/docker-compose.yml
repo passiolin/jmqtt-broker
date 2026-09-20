@@ -26,5 +26,10 @@ services:
       # JMQTT_BROKER_KAFKA_BOOTSTRAP_SERVERS: "10.0.0.5:9092"
       # JMQTT_BROKER_REDIS_ENABLED: "true"
       # JMQTT_BROKER_REDIS_HOST: "10.0.0.6"
+      # HTTP 认证/ACL(EMQX 契约), 见主 README「HTTP 认证与 ACL」:
+      # JMQTT_BROKER_HTTP_AUTH_ENABLED: "true"
+      # JMQTT_BROKER_HTTP_AUTH_URL: "http://auth-center:8080/mqtt/auth"
+      # JMQTT_BROKER_HTTP_ACL_ENABLED: "true"
+      # JMQTT_BROKER_HTTP_ACL_URL: "http://auth-center:8080/mqtt/acl"
     mem_limit: 1g
     # healthcheck 已在镜像里定义(对 1883 建 TCP 连接), 无需重复声明

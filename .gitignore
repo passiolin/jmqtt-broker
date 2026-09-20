@@ -68,3 +68,6 @@ Thumbs.db
 # 运行时产物
 logs/
 /data/
+
+# 本地工具目录(zcode)
+.zcode/

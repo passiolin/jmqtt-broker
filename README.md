@@ -274,6 +274,57 @@ SSL 终结交给前面的负载均衡层（NLB / ALB / HAProxy / Nginx 等）：
 - MQTTS（8883）、WSS（443）等对外端口与限流、访问控制统一在接入层收口；
 - broker 与 LB 之间通常同处内网 / 安全组，明文转发不增加暴露面。
 
+### HTTP 认证与 ACL（EMQX 兼容）
+
+鉴权采用可插拔设计，契约兼容 EMQX 5.x 的 HTTP authenticator / HTTP authorization：**认证**（能不能连）与 **ACL 授权**（连上后能 pub/sub 哪些 topic）是两套独立机制 —— 已经为 EMQX 写好的认证服务端可以直接对接。
+
+**认证**（`jmqtt.broker.http-auth`，默认关）。CONNECT 时 broker POST：
+
+```json
+{"clientid":"dev-1", "username":"app", "password":"...", "peerhost":"10.0.0.7"}
+```
+
+（`password-hash: sha256` 时发摘要，明文不出 broker；GET 方式走查询参数。）服务端回：
+
+```json
+{"result": "allow", "superuser": true}
+```
+
+- `allow` 放行；`deny` 拒绝（v5 0x86 / v3 code 4）；**`ignore` 落到认证链下一环** —— 内置静态鉴权（`auth-username`/`auth-password`），即链为 `[http, 内置]`
+- `superuser: true`：该连接**跳过后续全部 ACL 检查**
+- 超时/不可达/响应不合法：按 `on-error` 处理 —— `reject`（默认，fail-closed）或 `ignore`（回落内置）
+- 故障后进入 `cooldown-ms` 熔断冷却，期间不再发请求，防止认证中心故障拖垮连接建立
+
+**ACL**（`jmqtt.broker.http-acl`，默认关）。每次订阅（逐过滤器）与每条 PUBLISH 前询问：
+
+```json
+{"clientid":"dev-1", "username":"app", "peerhost":"10.0.0.7", "action":"publish", "topic":"cmd/dev/1"}
+```
+
+响应 `{"result":"allow"|"deny"|"ignore"}`；`ignore` 与故障按 `on-fail`（默认 `deny`，fail-closed）。实现上的三条硬约束：
+
+- **决策缓存是可行性前提**（默认 60s TTL / 每客户端 32 条 LRU）：ACL 挂在每条 PUBLISH 上，没有缓存等于把投递路径接进 HTTP RTT。缓存命中零外部调用；断连即释放
+- **保序**：判定挂起期间同连接的后续报文经每连接串行门**按序排队**（有界 64，超限关连接）—— MQTT 要求同一连接保序，异步判定不能破坏它
+- **拒绝语义按版本**：SUBSCRIBE 被拒在 SUBACK 里逐项回 0x87（v3 0x80），不断连接；PUBLISH 被拒 v5 回 PUBACK/PUBREC 0x87，v3 静默丢弃 + 日志（v3 没有逐条错误通道，关连接只会制造重连风暴）
+
+**认证服务端示例**（Spring）：
+
+```java
+@PostMapping("/mqtt/auth")
+Map<String, Object> auth(@RequestBody Map<String, String> req) {
+    boolean ok = deviceService.checkPassword(req.get("username"), req.get("password"));
+    return Map.of("result", ok ? "allow" : "deny");
+}
+
+@PostMapping("/mqtt/acl")
+Map<String, Object> acl(@RequestBody Map<String, String> req) {
+    boolean ok = aclService.can(req.get("username"), req.get("action"), req.get("topic"));
+    return Map.of("result", ok ? "allow" : "deny");
+}
+```
+
+两个开关都关闭时（默认）：认证走内置静态鉴权，ACL 完全不生效，行为与引入本功能之前完全一致（同步内联路径，零额外开销）。`enabled: true` 但未配 `url` 时启动即失败 —— 不静默放行。
+
 ### 集群（Kafka）
 
 ```yaml

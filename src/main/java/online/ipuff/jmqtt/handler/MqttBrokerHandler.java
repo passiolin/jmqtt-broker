@@ -77,6 +77,7 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
     private final InternalSendServer internalSendServer;
     private final IRetainMessageStoreService retainMessageStoreService;
     private final AdminStatePublisher adminStatePublisher;
+    private final online.ipuff.jmqtt.authz.IAclService aclService;
 
     public MqttBrokerHandler(ProtocolProcessor protocolProcessor,
                              ConnectionRegistry connectionRegistry,
@@ -84,7 +85,8 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
                              InternalCommunication internalCommunication,
                              InternalSendServer internalSendServer,
                              IRetainMessageStoreService retainMessageStoreService,
-                             AdminStatePublisher adminStatePublisher) {
+                             AdminStatePublisher adminStatePublisher,
+                             online.ipuff.jmqtt.authz.IAclService aclService) {
         this.protocolProcessor = protocolProcessor;
         this.connectionRegistry = connectionRegistry;
         this.sessionStoreService = sessionStoreService;
@@ -92,6 +94,7 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
         this.internalSendServer = internalSendServer;
         this.retainMessageStoreService = retainMessageStoreService;
         this.adminStatePublisher = adminStatePublisher;
+        this.aclService = aclService;
     }
 
     @Override
@@ -108,6 +111,14 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
 
         if (msg.decoderResult().isFailure()) {
             handleDecodeFailure(channel, msg);
+            return;
+        }
+
+        // CONNECT 认证挂起中(HTTP 鉴权等外部响应): 忽略一切后续报文。
+        // 规范要求客户端必须等 CONNACK 才能继续, 此时到来的都是异常流量;
+        // 且连接状态尚未初始化(clientId/发送缓冲都还没写入), 处理它们必然读到空值。
+        if (Boolean.TRUE.equals(channel.attr(ChannelAttributes.AUTH_PENDING).get())) {
+            log.debug("认证挂起期间收到报文, 忽略: {}", msg.fixedHeader().messageType());
             return;
         }
 
@@ -149,6 +160,8 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
             if (removed) {
                 adminStatePublisher.clientOffline(clientId);
             }
+            // ACL 决策缓存随连接释放(无论是否被接管 —— 新连接有自己的缓存条目)
+            aclService.onClientOffline(clientId);
             publishWillIfNeeded(channel, clientId);
         }
 

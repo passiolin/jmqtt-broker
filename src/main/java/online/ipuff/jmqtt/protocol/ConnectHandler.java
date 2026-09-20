@@ -23,6 +23,7 @@ import io.netty.handler.codec.mqtt.MqttVersion;
 import io.netty.handler.timeout.IdleStateHandler;
 import io.netty.util.CharsetUtil;
 import online.ipuff.jmqtt.admin.AdminStatePublisher;
+import online.ipuff.jmqtt.auth.AuthResult;
 import online.ipuff.jmqtt.auth.IAuthService;
 import online.ipuff.jmqtt.cluster.ClusterBus;
 import online.ipuff.jmqtt.cluster.InternalSendServer;
@@ -50,6 +51,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * CONNECT 处理。
@@ -153,6 +155,8 @@ public class ConnectHandler {
 
         ConnectOptions options = ConnectOptions.parse(msg, properties);
         channel.attr(ChannelAttributes.CONNECT_OPTIONS).set(options);
+        // 用户名在认证前后各有一个读者(HTTP 认证中心 / ACL 服务), 统一落到 Channel 上
+        channel.attr(ChannelAttributes.USERNAME).set(msg.payload().userName());
 
         String clientId = msg.payload().clientIdentifier();
         boolean assignedClientId = false;
@@ -172,11 +176,89 @@ public class ConnectHandler {
             }
         }
 
-        // 2) 认证
-        if (!authenticate(channel, msg, version)) {
+        // 2) 认证 —— 可能要等外部 HTTP 认证中心的响应, 挂起处理。
+        //    挂起前先把续接要用到的 CONNECT 数据全部取出:
+        //    SimpleChannelInboundHandler 会在本方法返回后释放报文,
+        //    而 CONNECT 的 payload 在解码时已物化为 byte[]/String, 现在取是安全的。
+        WillMessage willMessage = extractWillMessage(msg, options);
+        int requestedKeepAlive = msg.variableHeader().keepAliveTimeSeconds();
+        String username = msg.payload().userName();
+        String password = msg.payload().passwordInBytes() == null
+                ? null
+                : new String(msg.payload().passwordInBytes(), CharsetUtil.UTF_8);
+
+        // clientId 在 v5 分配分支被重赋值, 拷贝成最终变量供续接 lambda 捕获
+        final String effectiveClientId = clientId;
+        final boolean effectiveAssigned = assignedClientId;
+
+        CompletableFuture<AuthResult> authFuture = properties.authEnabled()
+                ? authService.authenticate(effectiveClientId, username, password,
+                        ChannelAttributes.peerhostOf(channel))
+                : CompletableFuture.completedFuture(AuthResult.ALLOW);
+
+        awaitAuth(channel, authFuture, version, () -> finishConnect(
+                channel, version, options, effectiveClientId, effectiveAssigned,
+                willMessage, requestedKeepAlive));
+    }
+
+    /**
+     * 等认证结果, 再执行续接。
+     *
+     * <p>future 已完成(内置静态鉴权 / 鉴权关闭)时<b>同步内联</b>执行 ——
+     * HTTP 鉴权未开启的部署行为与异步化之前完全一致, 不付任何线程切换成本。
+     * 未完成(HTTP 认证挂起中)时置 {@link ChannelAttributes#AUTH_PENDING},
+     * 入口据此忽略后续报文; 结果回来后 hop 回该连接的 EventLoop 续接,
+     * 连接状态始终保持单线程访问。挂起期间连接断开则安全放弃。
+     */
+    private void awaitAuth(Channel channel, CompletableFuture<AuthResult> future,
+                           MqttVersion version, Runnable continuation) {
+        if (future.isDone()) {
+            completeAuth(channel, join(future), version, continuation);
             return;
         }
+        channel.attr(ChannelAttributes.AUTH_PENDING).set(Boolean.TRUE);
+        future.whenComplete((result, error) -> channel.eventLoop().execute(() -> {
+            channel.attr(ChannelAttributes.AUTH_PENDING).set(null);
+            if (!channel.isActive()) {
+                log.debug("认证结果到达前连接已断开, 放弃本次 CONNECT");
+                return;
+            }
+            completeAuth(channel, error == null ? result : AuthResult.DENY, version, continuation);
+        }));
+    }
 
+    /**
+     * 已完成的 future 取值; 异常一律按拒绝处理(实现方本不该让 future 异常完成,
+     * 这里是兜底 —— 认证路径上的任何意外都不能变成放行)。
+     */
+    private static AuthResult join(CompletableFuture<AuthResult> future) {
+        try {
+            return future.join();
+        } catch (RuntimeException e) {
+            return AuthResult.DENY;
+        }
+    }
+
+    private void completeAuth(Channel channel, AuthResult result,
+                              MqttVersion version, Runnable continuation) {
+        if (!result.allowed()) {
+            log.debug("CONNECT 被拒绝: 认证失败");
+            rejectAndClose(channel, version, ReplyFactory.ConnAckReason.BAD_CREDENTIALS);
+            return;
+        }
+        if (result.superuser()) {
+            channel.attr(ChannelAttributes.SUPERUSER).set(Boolean.TRUE);
+        }
+        continuation.run();
+    }
+
+    /**
+     * 认证通过后的 CONNECT 后半段: 会话处理、落库、注册、CONNACK、恢复投递。
+     * 参数里的遗嘱与心跳是挂起前从 CONNECT 报文里取出的快照。
+     */
+    private void finishConnect(Channel channel, MqttVersion version, ConnectOptions options,
+                               String clientId, boolean assignedClientId,
+                               WillMessage willMessage, int requestedKeepAlive) {
         // 3) 会话处理 —— 决定 sessionPresent
         SessionStore existing = sessionStoreService.get(clientId);
         boolean sessionPresent = false;
@@ -203,8 +285,7 @@ public class ConnectHandler {
             }
         }
 
-        // 4) 遗嘱(含 v5 的 Will Delay Interval, 先解析保存, 投递时机见 WillMessage)
-        WillMessage willMessage = extractWillMessage(msg, options);
+        // 4) 遗嘱已在挂起前解析(参数传入, 含 v5 的 Will Delay Interval)
 
         // 5) 落库会话
         SessionStore session = (existing != null && !options.cleanStart())
@@ -231,7 +312,7 @@ public class ConnectHandler {
         // 6) 心跳: server-keep-alive 覆盖客户端协商值(仅当配置大于 0)
         int keepAlive = properties.serverKeepAlive() > 0
                 ? properties.serverKeepAlive()
-                : msg.variableHeader().keepAliveTimeSeconds();
+                : requestedKeepAlive;
         configureKeepAlive(channel, keepAlive);
 
         // 7) 注册连接, 并踢掉同一 clientId 的旧连接(连接接管)
@@ -368,23 +449,6 @@ public class ConnectHandler {
         }
         log.info("已恢复会话订阅: clientId={} 订阅数={}",
                 persisted.clientId(), persisted.subscriptions().size());
-    }
-
-    private boolean authenticate(Channel channel, MqttConnectMessage msg, MqttVersion version) {
-        if (!properties.authEnabled()) {
-            return true;
-        }
-        String username = msg.payload().userName();
-        String password = msg.payload().passwordInBytes() == null
-                ? null
-                : new String(msg.payload().passwordInBytes(), CharsetUtil.UTF_8);
-
-        if (!authService.checkValid(username, password)) {
-            log.debug("CONNECT 被拒绝: 认证失败 username={}", username);
-            rejectAndClose(channel, version, ReplyFactory.ConnAckReason.BAD_CREDENTIALS);
-            return false;
-        }
-        return true;
     }
 
     /**
