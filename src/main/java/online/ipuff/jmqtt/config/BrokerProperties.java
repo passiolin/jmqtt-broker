@@ -50,10 +50,6 @@ public record BrokerProperties(
         @Min(0) int workerThreads,
         boolean useEpoll,
 
-        boolean sslEnabled,
-        @NotBlank String sslKeystore,
-        String sslPassword,
-
         boolean authEnabled,
         String authUsername,
         String authPassword,

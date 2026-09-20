@@ -52,7 +52,7 @@
 
 ### 2.1 在途恢复端到端（两阶段，真实 kill -9）
 
-驱动：`tools/ssltest/InflightRecoveryTest.java` + `tools/run-inflight-recovery.sh`
+驱动：`tools/mqtt5/InflightRecoveryTest.java` + `tools/run-inflight-recovery.sh`
 
 | 阶段 | 断言 | 结果 |
 |---|---|---|

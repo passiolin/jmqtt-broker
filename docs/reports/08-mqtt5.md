@@ -289,8 +289,8 @@ v5 端到端覆盖的 10 组断言：
 
 | 脚本 | 用途 |
 |---|---|
-| `tools/ssltest/MqttV5CodecProbe.java` | 编解码往返探针（12 项），钉死第一节的三个事实 |
-| `tools/ssltest/MqttV5E2ETest.java` | 裸 TCP 的 v5 端到端客户端（37 项断言） |
+| `tools/mqtt5/MqttV5CodecProbe.java` | 编解码往返探针（12 项），钉死第一节的三个事实 |
+| `tools/mqtt5/MqttV5E2ETest.java` | 裸 TCP 的 v5 端到端客户端（37 项断言） |
 | `tools/run-mqtt5.sh` | 一键跑 v5 端到端验证 |
 
 ---

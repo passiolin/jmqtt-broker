@@ -31,9 +31,6 @@ import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.websocketx.WebSocketServerProtocolHandler;
 import io.netty.handler.codec.mqtt.MqttDecoder;
 import io.netty.handler.codec.mqtt.MqttEncoder;
-import io.netty.handler.ssl.SslContext;
-import io.netty.handler.ssl.SslContextBuilder;
-import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.timeout.IdleStateHandler;
 import online.ipuff.jmqtt.config.BrokerProperties;
 import online.ipuff.jmqtt.handler.MqttBrokerHandler;
@@ -42,13 +39,9 @@ import online.ipuff.jmqtt.session.ConnectionRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.SmartLifecycle;
-import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
-import javax.net.ssl.KeyManagerFactory;
-import java.io.InputStream;
-import java.security.KeyStore;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -74,7 +67,6 @@ public class BrokerServer implements SmartLifecycle {
 
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
-    private SslContext sslContext;
     private Channel mqttChannel;
     private Channel webSocketChannel;
     private boolean useEpoll;
@@ -106,8 +98,6 @@ public class BrokerServer implements SmartLifecycle {
             this.workerGroup = useEpoll
                     ? new EpollEventLoopGroup(properties.workerThreadsOrDefault())
                     : new NioEventLoopGroup(properties.workerThreadsOrDefault());
-
-            initSslContext();
 
             startMqttServer();
             if (properties.websocketEnabled()) {
@@ -169,30 +159,6 @@ public class BrokerServer implements SmartLifecycle {
         }
     }
 
-    private void initSslContext() throws Exception {
-        if (!properties.sslEnabled()) {
-            return;
-        }
-        ClassPathResource resource = new ClassPathResource(properties.sslKeystore());
-        if (!resource.exists()) {
-            throw new IllegalStateException(
-                    "ssl-enabled=true 但找不到密钥库: " + properties.sslKeystore()
-                            + "。请将 PKCS12 格式的证书放到 src/main/resources/ 下, 或将 ssl-enabled 置为 false。");
-        }
-        try (InputStream in = resource.getInputStream()) {
-            KeyStore keyStore = KeyStore.getInstance("PKCS12");
-            keyStore.load(in, toChars(properties.sslPassword()));
-            KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
-            kmf.init(keyStore, toChars(properties.sslPassword()));
-            this.sslContext = SslContextBuilder.forServer(kmf).build();
-        }
-        log.info("已加载 TLS 密钥库: {}", properties.sslKeystore());
-    }
-
-    private static char[] toChars(String s) {
-        return s == null ? new char[0] : s.toCharArray();
-    }
-
     private ServerBootstrap baseBootstrap(ChannelInitializer<SocketChannel> childInitializer) {
         ServerBootstrap bootstrap = new ServerBootstrap();
         bootstrap.group(bossGroup, workerGroup)
@@ -225,10 +191,6 @@ public class BrokerServer implements SmartLifecycle {
                         .addLast("mqttDecoder", new MqttDecoder(properties.maxPayloadSize()))
                         .addLast("mqttEncoder", MqttEncoder.INSTANCE)
                         .addLast("broker", brokerHandler);
-                if (sslContext != null) {
-                    SslHandler sslHandler = sslContext.newHandler(socketChannel.alloc());
-                    socketChannel.pipeline().addAfter("idle", "ssl", sslHandler);
-                }
             }
         });
         this.mqttChannel = bind(bootstrap, properties.port());
@@ -239,12 +201,7 @@ public class BrokerServer implements SmartLifecycle {
             @Override
             protected void initChannel(SocketChannel socketChannel) {
                 socketChannel.pipeline()
-                        .addFirst("idle", new IdleStateHandler(0, 0, properties.defaultKeepAlive()));
-                if (sslContext != null) {
-                    SslHandler sslHandler = sslContext.newHandler(socketChannel.alloc());
-                    socketChannel.pipeline().addAfter("idle", "ssl", sslHandler);
-                }
-                socketChannel.pipeline()
+                        .addFirst("idle", new IdleStateHandler(0, 0, properties.defaultKeepAlive()))
                         .addLast("httpCodec", new HttpServerCodec())
                         .addLast("httpAggregator", new HttpObjectAggregator(1 << 20))
                         .addLast("httpCompressor", new HttpContentCompressor())

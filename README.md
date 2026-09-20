@@ -265,17 +265,14 @@ jmqtt:
 ```
 
 
-### TLS / MQTTS
+### TLS / MQTTS：在 LB 层终结
 
-默认关闭。启用时需提供 PKCS12 密钥库：
+Broker **有意不内置 TLS** —— 只监听明文 MQTT/TCP 与 MQTT/WebSocket，
+SSL 终结交给前面的负载均衡层（NLB / ALB / HAProxy / Nginx 等）：
 
-```bash
-keytool -genkeypair -alias jmqtt -keyalg RSA -keysize 2048 \
-        -storetype PKCS12 -keystore server.pfx -validity 3650
-# 将 server.pfx 放到 src/main/resources/keystore/ 下
-```
-
-然后设置 `ssl-enabled: true` 与 `ssl-password`。若开关为开但文件缺失，启动会给出明确报错。
+- 证书的安装与轮换集中在 LB 一处完成，broker 不感知证书，换证书不需要动 broker；
+- MQTTS（8883）、WSS（443）等对外端口与限流、访问控制统一在接入层收口；
+- broker 与 LB 之间通常同处内网 / 安全组，明文转发不增加暴露面。
 
 ### 集群（Kafka）
 
@@ -692,7 +689,7 @@ public boolean isPersistent() { return expireSeconds > 0; }
 
 ### 调试验证方式
 
-`tools/ssltest/MqttV5E2ETest.java` 是**裸 TCP** 实现的 v5 客户端（手工构造/解析字节），
+`tools/mqtt5/MqttV5E2ETest.java` 是**裸 TCP** 实现的 v5 客户端（手工构造/解析字节），
 `tools/run-mqtt5.sh` 一键运行。之所以不用 Netty 写测试客户端，除了「用不了」（见事实 1），
 更重要的是**不该用**：若客户端复用被测服务端同一套编解码假设，两边对 v5 线格式的理解错了
 也会一起错、测试照样通过。
@@ -765,8 +762,8 @@ public boolean isPersistent() { return expireSeconds > 0; }
 - **离线消息跨节点投递 7 / 7 通过**（`e2e/OfflineQueueCheck.java`，真实 Redis + 两节点）
 - **MQTT 流控窗口 3 / 3 通过**（`e2e/BackpressureCheck.java`，真实 broker + 只收不回的客户端）
 - **在途消息崩溃恢复通过**（`e2e` 两阶段：投递未确认 → `kill -9` → 重启 → 重连收到 `dup=1` 且 packetId 不变）
-- **MQTT 5.0 编解码往返 12 / 12 通过**（`tools/ssltest/MqttV5CodecProbe.java`，含本 broker 实际发出的全部 10 个 CONNACK 属性）
-- **MQTT 5.0 端到端 37 / 37 通过**（`tools/ssltest/MqttV5E2ETest.java`，裸 TCP 手工线格式，
+- **MQTT 5.0 编解码往返 12 / 12 通过**（`tools/mqtt5/MqttV5CodecProbe.java`，含本 broker 实际发出的全部 10 个 CONNACK 属性）
+- **MQTT 5.0 端到端 37 / 37 通过**（`tools/mqtt5/MqttV5E2ETest.java`，裸 TCP 手工线格式，
   覆盖 CONNACK 能力声明 / SUBACK / **UNSUBACK 带 payload** / 失败码细分 / 会话恢复 /
   空 clientId / 错误凭据 / **出站 PUBLISH 的 v5 线格式** / QoS2 全流程 / **Receive Maximum 窗口**）
 
@@ -923,7 +920,7 @@ jmqtt:inflight:{if-client} → 1 = {"topic":"if/room1/data","qos":1,"payload":"a
 
 类名为 `MqttE2ECheck` / `SessionRestoreCheck` / `OfflineQueueCheck` / `BackpressureCheck`
 而非 `*Test`，因此**不会**进入 surefire 的默认执行集 —— 它们依赖真实运行的 broker。
-（`MqttV5E2ETest` 同样放在 `tools/ssltest/`，由 `tools/run-mqtt5.sh` 驱动。）
+（`MqttV5E2ETest` 同样放在 `tools/mqtt5/`，由 `tools/run-mqtt5.sh` 驱动。）
 
 **尚未验证的部分（需要你在真实 Kafka 上跑）**：
 

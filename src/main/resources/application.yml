@@ -46,11 +46,6 @@ jmqtt:
     # 是否使用 Linux epoll 传输, 无 native 库时自动降级为 NIO
     use-epoll: true
 
-    # TLS (Self-signed MQTTS)
-    ssl-enabled: false
-    ssl-keystore: keystore/server.pfx
-    ssl-password: changeit
-
     # 连接认证
     auth-enabled: true
     auth-username: jmqtt
