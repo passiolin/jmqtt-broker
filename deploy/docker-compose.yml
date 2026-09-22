@@ -26,6 +26,8 @@ services:
       # JMQTT_KAFKA_BOOTSTRAP_SERVERS: "10.0.0.5:9092"
       # JMQTT_REDIS_ENABLED: "true"
       # JMQTT_REDIS_HOST: "10.0.0.6"
+      # 挂载的自定义路径配置文件(文件名任意, 覆盖优先级高于环境变量):
+      # SPRING_CONFIG_ADDITIONAL_LOCATION: "file:/etc/jmqtt/overrides.yml"
       # HTTP 认证/ACL(EMQX 契约), 见主 README「HTTP 认证与 ACL」:
       # JMQTT_BROKER_HTTP_AUTH_ENABLED: "true"
       # JMQTT_BROKER_HTTP_AUTH_URL: "http://auth-center:8080/mqtt/auth"

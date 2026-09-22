@@ -60,6 +60,13 @@ application.yml 对基础设施配置内置了 `${ENV:默认}` 占位符 —— 
 | `JMQTT_KAFKA_CONSUMER_THREADS` | 集群消费并行度 | 1 |
 | `JMQTT_REDIS_ENABLED` / `JMQTT_REDIS_HOST` / `JMQTT_REDIS_PORT` / `JMQTT_REDIS_PASSWORD` / `JMQTT_REDIS_DATABASE` | 会话持久化 Redis | false / 127.0.0.1 / 6379 / 空 / 0 |
 
+**自定义路径的配置文件**(docker 挂载场景, 文件名可自定义, 与 `JMQTT_*` 环境变量并存且优先级更高):
+
+```bash
+docker run -e SPRING_CONFIG_ADDITIONAL_LOCATION=file:/etc/jmqtt/overrides.yml \
+           -v ./prod-config.yml:/etc/jmqtt/overrides.yml:ro jmqtt-broker:latest
+```
+
 其余配置(含 HTTP 认证/ACL)仍可用 Spring Boot 原生松散绑定:
 `JMQTT_BROKER_HTTP_AUTH_URL` → `jmqtt.broker.http-auth.url`,规则是
 `JMQTT_BROKER_` + 大写下划线形式。JVM 参数通过 `JAVA_OPTS` 覆盖,
