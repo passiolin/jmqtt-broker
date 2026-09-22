@@ -30,7 +30,7 @@ mvn clean package
 ### 2. 运行
 
 ```bash
-java -jar target/jmqtt-broker-0.1.0-SNAPSHOT.jar
+java -jar target/jmqtt-broker.jar
 ```
 
 或开发期直接：
@@ -57,7 +57,7 @@ password: jmqtt
 ```
 
 > 生产环境请把 `jmqtt.broker.auth-password` 改成 SHA-256 摘要形式。
-> 生成方式：`java -cp target/jmqtt-broker-*.jar online.ipuff.jmqtt.auth.util.PwdUtil <明文密码>`
+> 生成方式：`java -cp target/jmqtt-broker.jar online.ipuff.jmqtt.auth.util.PwdUtil <明文密码>`
 
 ### 4. HTTP API
 
@@ -990,12 +990,12 @@ Kafka 4.x 在这一限制下无法启动（`unable to create native thread`）�
 
 ```bash
 # 节点 1
-java -jar target/jmqtt-broker-0.1.0-SNAPSHOT.jar --jmqtt.broker.id=node1 \
+java -jar target/jmqtt-broker.jar --jmqtt.broker.id=node1 \
      --jmqtt.broker.port=1883 --server.port=8922 \
      --jmqtt.broker.cluster-enabled=true --jmqtt.broker.kafka.enabled=true
 
 # 节点 2 (同机改端口即可)
-java -jar target/jmqtt-broker-0.1.0-SNAPSHOT.jar --jmqtt.broker.id=node2 \
+java -jar target/jmqtt-broker.jar --jmqtt.broker.id=node2 \
      --jmqtt.broker.port=1884 --server.port=8923 \
      --jmqtt.broker.websocket-port=8084 \
      --jmqtt.broker.cluster-enabled=true --jmqtt.broker.kafka.enabled=true

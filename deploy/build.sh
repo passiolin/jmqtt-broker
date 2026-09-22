@@ -34,7 +34,7 @@ fi
 echo "==> mvn ${MVN_ARGS[*]}"
 mvn "${MVN_ARGS[@]}"
 
-JAR="target/jmqtt-broker-${VERSION}.jar"
+JAR="target/jmqtt-broker.jar"
 if [[ ! -f "$JAR" ]]; then
     echo "找不到 ${JAR}" >&2
     exit 1

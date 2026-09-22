@@ -106,6 +106,8 @@
     </dependencies>
 
     <build>
+        <!-- 产物名固定不带版本号: 构建/部署脚本引用一个稳定路径, 版本只进镜像 tag -->
+        <finalName>jmqtt-broker</finalName>
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
