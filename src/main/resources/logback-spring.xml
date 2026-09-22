@@ -12,7 +12,8 @@
     <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
         <file>logs/${APP_NAME}.log</file>
         <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
-            <fileNamePattern>logs/${APP_NAME}-%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <!-- 归档自动 gzip 压缩: fileNamePattern 以 .gz 结尾即启用, 滚动时压缩历史文件 -->
+            <fileNamePattern>logs/${APP_NAME}-%d{yyyy-MM-dd}.%i.log.gz</fileNamePattern>
             <maxFileSize>50MB</maxFileSize>
             <maxHistory>30</maxHistory>
             <totalSizeCap>1GB</totalSizeCap>
