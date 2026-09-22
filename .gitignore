@@ -71,3 +71,6 @@ logs/
 
 # 本地工具目录(zcode)
 .zcode/
+
+# 本地/部署环境定制(被 application.yml 的 spring.config.import 可选加载)
+application-local.yml

@@ -5,6 +5,11 @@ server:
 spring:
   application:
     name: jmqtt-broker
+  # 本地/部署环境定制: 激活 local profile, 工作目录(或其 config/ 子目录)下的
+  # application-local.yml 会覆盖本文件的同名配置(外部文件优先级高于 jar 内配置)。
+  # 没有该文件时 profile 空跑、零影响; 该文件已进 .gitignore, 密码/地址不入库
+  profiles:
+    include: local
   jackson:
     default-property-inclusion: non_null
   task:
@@ -196,7 +201,6 @@ jmqtt:
       #   - topic: ota-status-push
       #     qos: 0
       downlink: []
-          qos: 1
       # ---- 生产者 ----
       # Kafka 不可用时的最长阻塞。必须设小, 否则会卡住 MQTT 发布路径
       max-block-ms: 1000

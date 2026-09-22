@@ -225,6 +225,12 @@ boolean sessionPresent = !msg.variableHeader().isCleanSession();   // 只看客�
 
 ## 配置
 
+**本地/部署环境定制**：工作目录(或其 `config/` 子目录)下放 `application-local.yml`
+即可覆盖仓库默认配置(外部文件优先级高于 jar 内配置；`spring.profiles.include: local`
+已内置激活)。该文件已加入 `.gitignore` —— 密码、内网地址、真实 topic 只写在里面,
+不会入库。注意:`mvn test` 会加载它,跑测试前可临时移开。
+
+
 完整配置见 `src/main/resources/application.yml`，前缀 `jmqtt.broker`。
 
 常用项：
