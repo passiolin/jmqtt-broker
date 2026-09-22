@@ -1,5 +1,6 @@
+# HTTP API / 健康检查端口(环境变量 SERVER_PORT 亦为 Spring Boot 原生支持)
 server:
-  port: 8922
+  port: ${SERVER_PORT:8922}
 
 spring:
   application:
@@ -28,14 +29,14 @@ management:
 jmqtt:
   broker:
     # Broker 唯一标识, 集群模式下用于实例判断
-    id: jmqtt
+    id: ${JMQTT_ID:jmqtt}
     # 监听地址, 留空表示绑定所有网卡
-    host:
+    host: ${JMQTT_HOST:}
     # MQTT TCP 端口
-    port: 1883
+    port: ${JMQTT_PORT:1883}
     # WebSocket
-    websocket-enabled: true
-    websocket-port: 8083
+    websocket-enabled: ${JMQTT_WEBSOCKET_ENABLED:true}
+    websocket-port: ${JMQTT_WEBSOCKET_PORT:8083}
     websocket-path: /mqtt
 
     # Netty 线程
@@ -46,10 +47,10 @@ jmqtt:
     # 是否使用 Linux epoll 传输, 无 native 库时自动降级为 NIO
     use-epoll: true
 
-    # 连接认证
-    auth-enabled: true
-    auth-username: jmqtt
-    auth-password: jmqtt
+    # 连接认证(密码建议 sha256:<hex>, 见 PwdUtil)
+    auth-enabled: ${JMQTT_AUTH_ENABLED:true}
+    auth-username: ${JMQTT_AUTH_USERNAME:jmqtt}
+    auth-password: ${JMQTT_AUTH_PASSWORD:jmqtt}
 
     # HTTP 认证中心(EMQX 契约)。开启后 CONNECT 的认证 POST 给外部服务:
     #   请求  {"clientid","username","password","peerhost"} (password 按 password-hash 以明文/sha256 发送)
@@ -109,11 +110,11 @@ jmqtt:
 
     # 集群
     # 集群能力依赖 Kafka 总线: 打开它才会装配 KafkaClusterBus
-    cluster-enabled: false
+    cluster-enabled: ${JMQTT_CLUSTER_ENABLED:false}
     kafka:
       # 总开关。false 时装配单机总线, 消息只在本节点投递
-      enabled: false
-      bootstrap-servers: 127.0.0.1:9092
+      enabled: ${JMQTT_KAFKA_ENABLED:false}
+      bootstrap-servers: ${JMQTT_KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}
       client-id-prefix: jmqtt
 
       # ---- 消息面: 跨节点 pub/sub ----
@@ -170,11 +171,11 @@ jmqtt:
     # 只存会话属性 + 订阅关系, 用于跨节点会话恢复。
     # 绝不存放消息 —— 消息的归宿是 Kafka, 放进 Redis 等于把投递路径接到中心化存储上。
     redis:
-      enabled: false
-      host: 127.0.0.1
-      port: 6379
-      password:
-      database: 0
+      enabled: ${JMQTT_REDIS_ENABLED:false}
+      host: ${JMQTT_REDIS_HOST:127.0.0.1}
+      port: ${JMQTT_REDIS_PORT:6379}
+      password: ${JMQTT_REDIS_PASSWORD:}
+      database: ${JMQTT_REDIS_DATABASE:0}
       key-prefix: jmqtt
       # 连接建立路径上的命令超时, 必须设小
       command-timeout-ms: 1000
