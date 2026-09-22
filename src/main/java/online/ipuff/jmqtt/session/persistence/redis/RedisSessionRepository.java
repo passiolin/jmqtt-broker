@@ -15,9 +15,9 @@ package online.ipuff.jmqtt.session.persistence.redis;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.lettuce.core.ScriptOutputType;
-import io.lettuce.core.api.sync.RedisCommands;
 import online.ipuff.jmqtt.config.BrokerProperties;
 import online.ipuff.jmqtt.redis.RedisConnectionManager;
+import online.ipuff.jmqtt.redis.RedisSyncCommands;
 import online.ipuff.jmqtt.message.SubscribeStore;
 import online.ipuff.jmqtt.message.WillMessage;
 import online.ipuff.jmqtt.session.persistence.ISessionRepository;
@@ -165,7 +165,7 @@ public class RedisSessionRepository implements ISessionRepository {
             fields.put(FIELD_WILL, will);
         }
         execute("saveSession", () -> {
-            RedisCommands<String, String> cmd = commands();
+            RedisSyncCommands cmd = commands();
             String key = sessionKey(clientId);
             cmd.hset(key, fields);
             if (expireSeconds > 0) {
@@ -178,7 +178,7 @@ public class RedisSessionRepository implements ISessionRepository {
     @Override
     public void saveSubscription(String clientId, String topicFilter, int qos) {
         execute("saveSubscription", () -> {
-            RedisCommands<String, String> cmd = commands();
+            RedisSyncCommands cmd = commands();
             String key = subsKey(clientId);
             cmd.hset(key, topicFilter, Integer.toString(qos));
             long expireSeconds = sessionExpireSeconds(clientId);
@@ -228,7 +228,7 @@ public class RedisSessionRepository implements ISessionRepository {
         return redis.execute(op, action, fallback);
     }
 
-    private RedisCommands<String, String> commands() {
+    private RedisSyncCommands commands() {
         return redis.commands();
     }
 

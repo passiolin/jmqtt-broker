@@ -170,12 +170,42 @@ jmqtt:
     # 会话持久化(Redis)
     # 只存会话属性 + 订阅关系, 用于跨节点会话恢复。
     # 绝不存放消息 —— 消息的归宿是 Kafka, 放进 Redis 等于把投递路径接到中心化存储上。
+    #
+    # 三种部署模式(redis.mode)示例:
+    #
+    # 1) 单机(默认):
+    #     mode: standalone
+    #     host: 127.0.0.1
+    #     port: 6379
+    #
+    # 2) 哨兵(主从 + 自动故障转移, 推荐的生产形态):
+    #     mode: sentinel
+    #     master-id: mymaster        # sentinel monitor 配置的主节点名称
+    #     nodes:                     # 哨兵进程地址, 任一可达即可
+    #       - 10.0.0.6:26379
+    #       - 10.0.0.7:26379
+    #       - 10.0.0.8:26379
+    #
+    # 3) 集群(分片):
+    #     mode: cluster
+    #     nodes:                     # 种子节点, 任一可达即可
+    #       - 10.0.0.6:6379
+    #       - 10.0.0.7:6379
+    #       - 10.0.0.8:6379
+    #     # 集群只有 db0, database 必须为 0(非 0 启动即失败)
     redis:
       enabled: ${JMQTT_REDIS_ENABLED:false}
+      # standalone(默认) | sentinel | cluster
+      mode: ${JMQTT_REDIS_MODE:standalone}
       host: ${JMQTT_REDIS_HOST:127.0.0.1}
       port: ${JMQTT_REDIS_PORT:6379}
       password: ${JMQTT_REDIS_PASSWORD:}
       database: ${JMQTT_REDIS_DATABASE:0}
+      # 哨兵模式: sentinel monitor 的主节点名称
+      master-id: ${JMQTT_REDIS_MASTER_ID:}
+      # 哨兵/集群节点列表(host:port); 环境变量可用逗号分隔:
+      # JMQTT_REDIS_NODES=10.0.0.6:26379,10.0.0.7:26379
+      nodes: []
       key-prefix: jmqtt
       # 连接建立路径上的命令超时, 必须设小
       command-timeout-ms: 1000

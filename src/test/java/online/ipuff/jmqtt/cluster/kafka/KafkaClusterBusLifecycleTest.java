@@ -48,6 +48,8 @@ class KafkaClusterBusLifecycleTest {
     @Test
     @DisplayName("consumer-threads=3: worker 池创建、指标可见、stop 优雅退出不挂起")
     void parallelWorkersLifecycle() throws InterruptedException {
+        // 基线快照: 其他测试(如缓存的 Spring 上下文)可能遗留同名线程, 只断言本次新增的消失
+        java.util.Set<Thread> baseline = workerThreads();
         KafkaClusterBus bus = new KafkaClusterBus(props(3),
                 null, (clientId, fromNodeId) -> { });
         try {
@@ -62,11 +64,35 @@ class KafkaClusterBusLifecycleTest {
             assertFalse(bus.isRunning());
             assertTrue(elapsedMs < 15_000, "停止必须收敛(worker 排干 + 客户端关闭), 实际 " + elapsedMs + "ms");
         }
-        // worker 线程应已退出
-        Thread.sleep(300);
-        assertTrue(Thread.getAllStackTraces().keySet().stream()
-                        .noneMatch(t -> t.getName().startsWith("jmqtt-kafka-worker-")),
-                "停止后不得残留 worker 线程");
+        // 本 bus 的 worker 应已退出: 与基线求差, 有界等待消除线程收尾的毫秒级竞态
+        long deadline = System.currentTimeMillis() + 3000;
+        boolean workersGone = false;
+        while (!(workersGone = workerThreads().stream().noneMatch(t -> !baseline.contains(t)))) {
+            if (System.currentTimeMillis() > deadline) {
+                break;
+            }
+            Thread.sleep(50);
+        }
+        assertTrue(workersGone, "停止后不得残留本次启动的 worker 线程" + dumpWorkers());
+    }
+
+    private static java.util.Set<Thread> workerThreads() {
+        return Thread.getAllStackTraces().keySet().stream()
+                .filter(t -> t.getName().startsWith("jmqtt-kafka-worker-"))
+                .collect(java.util.stream.Collectors.toSet());
+    }
+
+    private static String dumpWorkers() {
+        StringBuilder sb = new StringBuilder("\n== 残留 worker 线程栈 ==\n");
+        Thread.getAllStackTraces().forEach((t, stack) -> {
+            if (t.getName().startsWith("jmqtt-kafka-worker-")) {
+                sb.append("-- ").append(t.getName()).append(" state=").append(t.getState()).append('\n');
+                for (StackTraceElement e : stack) {
+                    sb.append("      at ").append(e).append('\n');
+                }
+            }
+        });
+        return sb.toString();
     }
 
     @Test

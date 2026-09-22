@@ -321,7 +321,7 @@ class InternalSendServerTest {
                 true, List.of(),
                 "", List.of(), false, 1000, 1000, 200, 1, "none", "latest", "topic");
         BrokerProperties.RedisProperties redis = new BrokerProperties.RedisProperties(
-                false, "127.0.0.1", 6379, null, 0, "jmqtt", 1000, 5000, "off", 100, 10000);
+                false, "127.0.0.1", 6379, null, 0, "jmqtt", 1000, 5000, "off", 100, 10000, "standalone", null, null);
         return new BrokerProperties(
                 PROP_NODE, null, 1883, true, 8083, "/mqtt",
                 1, 2, false,

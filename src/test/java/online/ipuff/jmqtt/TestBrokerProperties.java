@@ -66,7 +66,7 @@ public final class TestBrokerProperties {
                                           BrokerProperties.KafkaProperties kafka,
                                           boolean authEnabled, String authUsername, String authPassword) {
         BrokerProperties.RedisProperties redis = new BrokerProperties.RedisProperties(
-                false, "127.0.0.1", 6379, null, 0, "jmqtt", 1000, 5000, "off", 100, 10000);
+                false, "127.0.0.1", 6379, null, 0, "jmqtt", 1000, 5000, "off", 100, 10000, "standalone", null, null);
         return new BrokerProperties(
                 nodeId, null, 1883, true, 8083, "/mqtt",
                 1, 2, false,

@@ -259,6 +259,13 @@ public record BrokerProperties(
      * @param inflightFlushIntervalMs async 模式的刷盘周期, 也就是该模式下的丢失窗口
      * @param inflightMaxPendingClients 待刷盘客户端数超过该值时立即触发一次刷盘,
      *        防止未刷盘状态无限堆积
+     * @param mode              部署模式: {@code standalone}(默认, 单机)/
+     *        {@code sentinel}(哨兵, 主从自动故障转移)/{@code cluster}(分片集群)。
+     *        本项目只存会话元数据, 通常单机或哨兵即可; 集群模式下
+     *        {@code database} 必须为 0(集群只有 db0)
+     * @param masterId          哨兵模式的主节点名称(sentinel monitor 的名字), 仅 sentinel 需要
+     * @param nodes             哨兵/集群的节点地址列表(host:port)。sentinel 模式列出
+     *        哨兵进程地址; cluster 模式列出集群种子节点(任一可达即可)
      */
     public record RedisProperties(
             boolean enabled,
@@ -271,7 +278,18 @@ public record BrokerProperties(
             @Min(1000) int healthIntervalMs,
             String inflightMode,
             @Min(10) int inflightFlushIntervalMs,
-            @Min(1) int inflightMaxPendingClients
+            @Min(1) int inflightMaxPendingClients,
+            @DefaultValue("standalone") String mode,
+            String masterId,
+            List<String> nodes
     ) {
+
+        public boolean sentinelMode() {
+            return "sentinel".equalsIgnoreCase(mode);
+        }
+
+        public boolean clusterMode() {
+            return "cluster".equalsIgnoreCase(mode);
+        }
     }
 }

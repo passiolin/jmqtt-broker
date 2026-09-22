@@ -13,9 +13,6 @@
  */
 package online.ipuff.jmqtt.redis;
 
-import io.lettuce.core.RedisClient;
-import io.lettuce.core.api.StatefulRedisConnection;
-import io.lettuce.core.api.sync.RedisCommands;
 import online.ipuff.jmqtt.config.BrokerProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -72,16 +69,16 @@ public class RedisConnectionManager {
 
     private static final Logger log = LoggerFactory.getLogger(RedisConnectionManager.class);
 
-    private final RedisClient redisClient;
+    private final RedisConnectionSource connectionSource;
     private final long healthIntervalMs;
 
-    private volatile StatefulRedisConnection<String, String> connection;
+    private volatile RedisConnectionSource.Handle connection;
 
     /** 已知故障的冷却截止时间(毫秒时间戳); 0 表示当前认为可用 */
     private volatile long downUntilMillis;
 
-    public RedisConnectionManager(RedisClient redisClient, BrokerProperties properties) {
-        this.redisClient = redisClient;
+    public RedisConnectionManager(RedisConnectionSource connectionSource, BrokerProperties properties) {
+        this.connectionSource = connectionSource;
         this.healthIntervalMs = properties.redis().healthIntervalMs();
     }
 
@@ -100,8 +97,8 @@ public class RedisConnectionManager {
      * 取同步命令接口。连接不可达时抛出异常 —— 调用方应通过
      * {@link #execute} 使用, 而不是直接调用本方法。
      */
-    public RedisCommands<String, String> commands() {
-        return connection().sync();
+    public RedisSyncCommands commands() {
+        return connection().commands();
     }
 
     /**
@@ -146,17 +143,19 @@ public class RedisConnectionManager {
 
     /**
      * 惰性建立连接。失败时抛异常, 由调用方的 execute 包装成降级。
+     * 单机/哨兵/集群的差异全部在 {@link RedisConnectionSource} 里,
+     * 这里只看到统一的「连接 + 命令视图」。
      */
-    private StatefulRedisConnection<String, String> connection() {
-        StatefulRedisConnection<String, String> current = connection;
-        if (current != null && current.isOpen()) {
+    private RedisConnectionSource.Handle connection() {
+        RedisConnectionSource.Handle current = connection;
+        if (current != null && current.connection().isOpen()) {
             return current;
         }
         synchronized (this) {
-            if (connection != null && connection.isOpen()) {
+            if (connection != null && connection.connection().isOpen()) {
                 return connection;
             }
-            connection = redisClient.connect();
+            connection = connectionSource.open();
             return connection;
         }
     }

@@ -422,18 +422,52 @@ curl -s http://127.0.0.1:8922/open/api/jmqtt/info | jq .data.clusterBus
 
 ### 会话持久化（Redis）
 
+三种部署模式（`redis.mode`），任选其一：
+
 ```yaml
+# 1) 单机（默认）
 jmqtt:
   broker:
     redis:
       enabled: true
+      mode: standalone
       host: 127.0.0.1
       port: 6379
       database: 0
       key-prefix: jmqtt
       command-timeout-ms: 1000   # 这些命令都在握手路径上, 必须设小
       health-interval-ms: 5000
+
+# 2) 哨兵（主从 + 自动故障转移, 推荐的生产形态）
+jmqtt:
+  broker:
+    redis:
+      enabled: true
+      mode: sentinel
+      master-id: mymaster        # sentinel monitor 配置的主节点名称
+      nodes:                     # 哨兵进程地址, 任一可达即可; 主从切换后自动跟随
+        - 10.0.0.6:26379
+        - 10.0.0.7:26379
+        - 10.0.0.8:26379
+      key-prefix: jmqtt
+
+# 3) 集群（分片）
+jmqtt:
+  broker:
+    redis:
+      enabled: true
+      mode: cluster
+      nodes:                     # 种子节点, 任一可达即可
+        - 10.0.0.6:6379
+        - 10.0.0.7:6379
+        - 10.0.0.8:6379
+      # 集群只有 db0: database 必须为 0, 非 0 启动即失败
 ```
+
+选型：本项目 Redis 只存会话元数据（属性 + 订阅 + 在途镜像 + 管理面状态），
+不在投递路径上 —— **哨兵解决高可用即可满足绝大多数部署**；集群（分片）面向
+单机内存确实不够的超大规模。三种模式共享同一套惰性连接、健康检查与冷却降级，
+配置错误（哨兵缺 master-id、集群配了 database、节点格式非法）启动即失败。
 
 键结构：
 

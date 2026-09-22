@@ -561,7 +561,7 @@ class ClusterBusTest {
                 1000,
                 false,
                 kafka,
-                new BrokerProperties.RedisProperties(false, "127.0.0.1", 6379, null, 0, "jmqtt", 1000, 5000, "off", 100, 10000),
+                new BrokerProperties.RedisProperties(false, "127.0.0.1", 6379, null, 0, "jmqtt", 1000, 5000, "off", 100, 10000, "standalone", null, null),
                 511,
                 true,
                 true,

@@ -132,7 +132,7 @@ class BroadcastPolicyTest {
                 60, 7200, 0, 0, 32, 1000, 1000,
                 true, kafka,
                 new BrokerProperties.RedisProperties(false, "127.0.0.1", 6379, null, 0,
-                        "jmqtt", 1000, 5000, "off", 100, 10000),
+                        "jmqtt", 1000, 5000, "off", 100, 10000, "standalone", null, null),
                 511, true, true, 10485760, 32768, 65536);
         // 不调用 start(): 本组用例只验证策略判断, 不需要连接 Kafka。
         // internalSendServer / takeoverListener 在这条路径上不会被触达。
