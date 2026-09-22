@@ -845,8 +845,10 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
         }
         int delivered = internalSendServer.sendPublishMessage(message);
         if (log.isDebugEnabled()) {
-            log.debug("下行消息投递: kafkaTopic={} mqttTopic={} 本地投递={}",
-                    record.topic(), message.topic(), delivered);
+            // 与入站报文日志同一规范: DOWNLINK 前缀 + key=value + payload 截断预览
+            log.debug("DOWNLINK clientId=unknown type=PUBLISH topic={} qos={} size={} 本地投递={} payload={}",
+                    message.topic(), message.qos(), message.payload().length, delivered,
+                    online.ipuff.jmqtt.util.Payloads.preview(message.payload()));
         }
     }
 

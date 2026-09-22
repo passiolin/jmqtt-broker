@@ -14,6 +14,8 @@
 package online.ipuff.jmqtt.handler;
 
 import io.netty.channel.Channel;
+
+import java.util.List;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
@@ -29,7 +31,9 @@ import io.netty.handler.codec.mqtt.MqttMessageIdVariableHeader;
 import io.netty.handler.codec.mqtt.MqttMessageType;
 import io.netty.handler.codec.mqtt.MqttPublishMessage;
 import io.netty.handler.codec.mqtt.MqttQoS;
+import io.netty.handler.codec.mqtt.MqttReasonCodeAndPropertiesVariableHeader;
 import io.netty.handler.codec.mqtt.MqttSubscribeMessage;
+import io.netty.handler.codec.mqtt.MqttTopicSubscription;
 import io.netty.handler.codec.mqtt.MqttUnacceptableProtocolVersionException;
 import io.netty.handler.codec.mqtt.MqttUnsubscribeMessage;
 import io.netty.handler.timeout.IdleState;
@@ -42,6 +46,7 @@ import online.ipuff.jmqtt.message.RetainMessageStore;
 import online.ipuff.jmqtt.message.WillMessage;
 import online.ipuff.jmqtt.protocol.ProtocolProcessor;
 import online.ipuff.jmqtt.session.ConnectionRegistry;
+import online.ipuff.jmqtt.util.Payloads;
 import online.ipuff.jmqtt.session.ISessionStoreService;
 import online.ipuff.jmqtt.session.SessionStore;
 import online.ipuff.jmqtt.store.IRetainMessageStoreService;
@@ -117,6 +122,12 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
             return;
         }
 
+        // 入站报文日志: 所有客户端报文必经的分发点, 一处打印保证格式统一。
+        // 只有 DEBUG 级才构造描述字符串(preview 截断, 见 Payloads)
+        if (log.isDebugEnabled()) {
+            log.debug("{}", describeInbound(channel, msg));
+        }
+
         // CONNECT 认证挂起中(HTTP 鉴权等外部响应): 忽略一切后续报文。
         // 规范要求客户端必须等 CONNACK 才能继续, 此时到来的都是异常流量;
         // 且连接状态尚未初始化(clientId/发送缓冲都还没写入), 处理它们必然读到空值。
@@ -148,6 +159,81 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
             case DISCONNECT -> protocolProcessor.disconnect().processDisconnect(channel, msg);
             default -> log.debug("忽略报文类型: {}", msg.fixedHeader().messageType());
         }
+    }
+
+    /**
+     * 入站报文的统一日志描述(规范: 前缀 INBOUND, key=value, 单行)。
+     *
+     * <p>格式: {@code INBOUND clientId=... type=... <类型专属字段>} ——
+     * CONNECT 带 username/proto/keepAlive/cleanSession(<b>绝不带密码</b>),
+     * PUBLISH 带 topic/qos/packetId/retain/size/payload(截断预览),
+     * SUBSCRIBE/UNSUBSCRIBE 逐过滤器带 QoS, 确认类只有 packetId。
+     * 静态且无副作用, 便于对格式本身做单测。
+     */
+    static String describeInbound(Channel channel, MqttMessage msg) {
+        String clientId = channel.attr(ChannelAttributes.CLIENT_ID).get();
+        if ((clientId == null || clientId.isEmpty()) && msg instanceof MqttConnectMessage connect) {
+            clientId = connect.payload().clientIdentifier();
+        }
+        if (clientId == null || clientId.isEmpty()) {
+            clientId = "unknown";
+        }
+        StringBuilder sb = new StringBuilder(96)
+                .append("INBOUND clientId=").append(clientId)
+                .append(" type=").append(msg.fixedHeader().messageType());
+        switch (msg.fixedHeader().messageType()) {
+            case CONNECT -> {
+                MqttConnectMessage connect = (MqttConnectMessage) msg;
+                sb.append(" username=").append(connect.payload().userName())
+                        .append(" proto=").append(connect.variableHeader().version())
+                        .append(" keepAlive=").append(connect.variableHeader().keepAliveTimeSeconds())
+                        .append(" cleanSession=").append(connect.variableHeader().isCleanSession())
+                        .append(" will=").append(connect.variableHeader().isWillFlag());
+            }
+            case PUBLISH -> {
+                MqttPublishMessage publish = (MqttPublishMessage) msg;
+                sb.append(" topic=").append(publish.variableHeader().topicName())
+                        .append(" qos=").append(publish.fixedHeader().qosLevel().value())
+                        .append(" packetId=").append(publish.variableHeader().packetId())
+                        .append(" retain=").append(publish.fixedHeader().isRetain())
+                        .append(" dup=").append(publish.fixedHeader().isDup())
+                        .append(" size=").append(publish.payload().readableBytes())
+                        .append(" payload=").append(Payloads.preview(publish.payload()));
+            }
+            case SUBSCRIBE -> {
+                MqttSubscribeMessage subscribe = (MqttSubscribeMessage) msg;
+                sb.append(" packetId=").append(subscribe.variableHeader().messageId());
+                sb.append(" filters=[");
+                List<MqttTopicSubscription> topics = subscribe.payload().topicSubscriptions();
+                for (int i = 0; i < topics.size(); i++) {
+                    if (i > 0) {
+                        sb.append(", ");
+                    }
+                    sb.append(topics.get(i).topicName())
+                            .append(':').append(topics.get(i).qualityOfService().value());
+                }
+                sb.append(']');
+            }
+            case UNSUBSCRIBE -> {
+                MqttUnsubscribeMessage unsubscribe = (MqttUnsubscribeMessage) msg;
+                sb.append(" packetId=").append(unsubscribe.variableHeader().messageId())
+                        .append(" topics=").append(unsubscribe.payload().topics());
+            }
+            case PUBACK, PUBREC, PUBREL, PUBCOMP -> {
+                if (msg.variableHeader() instanceof MqttMessageIdVariableHeader header) {
+                    sb.append(" packetId=").append(header.messageId());
+                }
+            }
+            case DISCONNECT -> {
+                if (msg.variableHeader() instanceof MqttReasonCodeAndPropertiesVariableHeader header) {
+                    sb.append(" reason=").append(header.reasonCode());
+                }
+            }
+            default -> {
+                // PINGREQ 等无附加字段
+            }
+        }
+        return sb.toString();
     }
 
     @Override
