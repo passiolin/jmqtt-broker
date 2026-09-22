@@ -99,7 +99,7 @@ public class InternalCommunication {
      * 出站侧据此跳过, 否则「每节点消费全量」的拓扑会指数级重发。
      */
     public InternalMessage fromLocal(String clientId, String topic, int qos,
-                                     byte[] payload, boolean retain, boolean dup) {
-        return new InternalMessage(properties.id(), clientId, topic, qos, payload, retain, dup);
+                                     byte[] payload, boolean retain, boolean dup, String username) {
+        return new InternalMessage(properties.id(), clientId, topic, qos, payload, retain, dup, username);
     }
 }

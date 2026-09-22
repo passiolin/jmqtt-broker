@@ -148,6 +148,7 @@ jmqtt:
       consumer-threads: 1
 
       # ---- 数据面: 上行出口 ----
+      # 单路由形态(兼容保留)。配置了下方的 routes 时, 这三项被 routes 取代
       # 留空表示不开启数据面出口
       uplink-topic: ""
       # 哪些主题算上行; 留空表示全部消息都视为上行
@@ -159,6 +160,43 @@ jmqtt:
       # true = 命中上行过滤器的消息只走数据面, 不再进集群广播
       # 当订阅者集中在云端(而非分布在各 broker)时置 true, 扇出从 N 倍降到 1 倍
       uplink-exclusive: false
+
+      # ---- 数据面: 多路由上行(推荐) ----
+      # 每条路由一组过滤器 + 目标 topic + 分区键(topic|device);
+      # 一条消息命中多条路由就各发一份, 未命中任何路由则不发 Kafka、只走集群广播。
+      # value 是 JSON 信封(只含 PUBLISH 消息), 分区键决定同 key 有序的边界:
+      # {"username":"app-user","topic":"demo/LCU-P1/abc123/event/up","timestamp":1789381061831,
+      #  "qos":1,"payload":"{\"cmd\":3041}","node":"broker-1","clientid":"device:LCU-P1:abc123"}
+      # 示例:
+      # routes:
+      #   - filters: ["device/+/telemetry"]
+      #     topic: telemetry-raw
+      #     key: device            # 按设备分区: 每设备自身时序有序 + 流量散开
+      #   - filters: ["app/+/signal", "device/+/status"]
+      #     topic: signaling
+      #     key: topic
+      routes: []
+
+      # ---- 连接事件(设备生命周期) ----
+      # 客户端上线/下线发布到该 topic(留空关闭)。key=clientId, 同一客户端的事件严格有序。
+      # value 是 JSON; reason: closed=主动 DISCONNECT, tcp_closed=断连/心跳超时/被接管:
+      # {"proto_ver":4,"proto_name":"MQTT","peername":"10.0.0.9:47414","node":"broker-1",
+      #  "connected_at":1788989660509,"clientid":"app:PAD-x:abc123","action":"connected"}
+      # {"username":"app-user","reason":"tcp_closed","proto_ver":4,"proto_name":"MQTT",
+      #  "peername":"10.0.0.9:51166","node":"broker-1","disconnected_at":1788982685781,
+      #  "clientid":"app:PAD-x:abc123","action":"disconnected"}
+      connection-event-topic: ""
+
+      # ---- 下行通道(后台 → broker) ----
+      # broker 消费这些 topic 并按本地订阅投递为 MQTT 消息(每节点独立 group)。
+      # value 是 JSON: {"topic":"demo/LCU-P1/abc123/property/down","qos":1,"payload":"{\"cmd\":3011}"}
+      # qos 缺省时用该通道配置的默认值; key 仅用于分区, 不参与解码。
+      # 只做本地投递、绝不回写 Kafka —— 结构性防回环。示例:
+      # downlink:
+      #   - topic: backend-commands
+      #   - topic: ota-jobs
+      #     qos: 1
+      downlink: []
 
       # ---- 生产者 ----
       # Kafka 不可用时的最长阻塞。必须设小, 否则会卡住 MQTT 发布路径
@@ -201,8 +239,6 @@ jmqtt:
       port: ${JMQTT_REDIS_PORT:6379}
       password: ${JMQTT_REDIS_PASSWORD:}
       database: ${JMQTT_REDIS_DATABASE:0}
-      # 哨兵模式: sentinel monitor 的主节点名称
-      master-id: ${JMQTT_REDIS_MASTER_ID:}
       # 哨兵/集群节点列表(host:port); 环境变量可用逗号分隔:
       # JMQTT_REDIS_NODES=10.0.0.6:26379,10.0.0.7:26379
       nodes: []

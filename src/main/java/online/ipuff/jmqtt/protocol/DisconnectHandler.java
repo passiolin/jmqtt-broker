@@ -88,6 +88,8 @@ public class DisconnectHandler {
             channel.close();
             return;
         }
+        // 标记优雅离线: channelInactive 据此把下线原因写成 disconnect 而不是 closed
+        channel.attr(ChannelAttributes.GRACEFUL_DISCONNECT).set(Boolean.TRUE);
 
         int reasonCode = reasonCode(msg);
         boolean publishWill = reasonCode == REASON_DISCONNECT_WITH_WILL;

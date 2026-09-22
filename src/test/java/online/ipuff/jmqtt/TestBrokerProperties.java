@@ -41,7 +41,7 @@ public final class TestBrokerProperties {
                 new BrokerProperties.KafkaProperties(
                         false, "127.0.0.1:9092", "jmqtt", "jmqtt-cluster", null,
                         true, List.of(),
-                        "", List.of(), false, 1000, 1000, 200, 1, "none", "latest", "topic"),
+                        "", List.of(), false, 1000, 1000, 200, 1, "none", "latest", "topic", null, null, null),
                 authEnabled, authUsername, authPassword);
     }
 
@@ -54,7 +54,7 @@ public final class TestBrokerProperties {
                 new BrokerProperties.KafkaProperties(
                         false, "127.0.0.1:9092", "jmqtt", "jmqtt-cluster", null,
                         true, List.of(),
-                        "", List.of(), false, 1000, 1000, 200, 1, "none", "latest", "topic"));
+                        "", List.of(), false, 1000, 1000, 200, 1, "none", "latest", "topic", null, null, null));
     }
 
     public static BrokerProperties create(String nodeId, int maxInflight, int maxOfflineQueueLen,

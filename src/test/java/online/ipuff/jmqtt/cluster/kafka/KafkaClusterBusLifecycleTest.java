@@ -42,7 +42,7 @@ class KafkaClusterBusLifecycleTest {
                 new BrokerProperties.KafkaProperties(
                         true, "127.0.0.1:19092", "jmqtt", "jmqtt-cluster", null,
                         true, List.of(), "", List.of(), false, 1000, 1000, 200,
-                        consumerThreads, "none", "latest", "topic"));
+                        consumerThreads, "none", "latest", "topic", null, null, null));
     }
 
     @Test

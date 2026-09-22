@@ -132,6 +132,27 @@ public final class ChannelAttributes {
         return remote == null ? null : remote.toString();
     }
 
+    /**
+     * 对端地址(ip:port), 连接事件契约里的 {@code peername}。
+     */
+    public static String peernameOf(Channel channel) {
+        java.net.SocketAddress remote = channel.remoteAddress();
+        if (remote instanceof java.net.InetSocketAddress address && address.getAddress() != null) {
+            return address.getAddress().getHostAddress() + ":" + address.getPort();
+        }
+        return remote == null ? null : remote.toString();
+    }
+
+    /**
+     * 客户端主动发送了 DISCONNECT 报文。
+     *
+     * <p>由 {@code DisconnectHandler} 在关闭前置位, {@code channelInactive} 据此区分
+     * 下线原因(closed = 优雅离线, tcp_closed = 连接断开/心跳超时/被接管),
+     * 供连接事件({@code connection-event-topic})使用。
+     */
+    public static final AttributeKey<Boolean> GRACEFUL_DISCONNECT =
+            AttributeKey.valueOf("jmqtt.gracefulDisconnect");
+
     private ChannelAttributes() {
     }
 }

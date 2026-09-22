@@ -27,6 +27,8 @@ package online.ipuff.jmqtt.cluster;
  * @param payload  消息体
  * @param retain   是否保留消息
  * @param dup      是否重发
+ * @param username 发布方的认证用户名, 可能为 null —— 仅数据面上行信封使用,
+ *                 消息面(集群广播)不序列化它
  */
 public record InternalMessage(
         String brokerId,
@@ -35,6 +37,7 @@ public record InternalMessage(
         int qos,
         byte[] payload,
         boolean retain,
-        boolean dup
+        boolean dup,
+        String username
 ) {
 }

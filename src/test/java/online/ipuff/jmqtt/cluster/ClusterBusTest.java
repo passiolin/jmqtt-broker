@@ -167,7 +167,7 @@ class ClusterBusTest {
         InternalCommunication communication =
                 new InternalCommunication(bus, props(kafka(true, "jmqtt-uplink", List.of(), false)));
 
-        communication.internalSend(new InternalMessage("node-1", "c1", "", 0, new byte[0], false, false));
+        communication.internalSend(new InternalMessage("node-1", "c1", "", 0, new byte[0], false, false, null));
 
         assertEquals(0, bus.published.size());
         assertEquals(0, bus.uplinkPublished.size());
@@ -179,7 +179,7 @@ class ClusterBusTest {
         BrokerProperties properties = props(kafka(false, "", List.of(), false));
         InternalCommunication communication = new InternalCommunication(new RecordingBus(false, false, null), properties);
 
-        InternalMessage message = communication.fromLocal("c1", "a/b", 1, new byte[]{1}, true, false);
+        InternalMessage message = communication.fromLocal("c1", "a/b", 1, new byte[]{1}, true, false, "u1");
 
         assertEquals(properties.id(), message.brokerId());
         assertEquals("c1", message.clientId());
@@ -197,7 +197,7 @@ class ClusterBusTest {
     @DisplayName("record 的 key 必须是 MQTT 主题 —— 分区顺序与主题还原都依赖它")
     void recordKeyIsMqttTopic() {
         InternalMessage message = new InternalMessage("node-1", "c1", "sensor/room1/temp", 1,
-                "23.5".getBytes(StandardCharsets.UTF_8), false, false);
+                "23.5".getBytes(StandardCharsets.UTF_8), false, false, null);
 
         ProducerRecord<String, byte[]> record = ClusterRecords.toRecord("jmqtt-cluster", message);
 
@@ -211,7 +211,7 @@ class ClusterBusTest {
     @DisplayName("编解码往返不丢字段")
     void codecRoundTrip() {
         InternalMessage original = new InternalMessage("node-7", "device-42", "sensor/room1/temp", 2,
-                new byte[]{0x01, 0x02, 0x03}, true, true);
+                new byte[]{0x01, 0x02, 0x03}, true, true, null);
 
         ConsumerRecord<String, byte[]> record = toConsumerRecord(
                 ClusterRecords.toRecord("jmqtt-cluster", original));
@@ -231,7 +231,7 @@ class ClusterBusTest {
     @DisplayName("clientId 为空时解码为 null(服务端主动下发场景)")
     void codecHandlesNullClientId() {
         InternalMessage original = new InternalMessage("node-1", null, "device/cmd", 0,
-                new byte[]{9}, false, false);
+                new byte[]{9}, false, false, null);
 
         InternalMessage decoded = ClusterRecords.fromRecord(
                 toConsumerRecord(ClusterRecords.toRecord("jmqtt-cluster", original)));
@@ -245,7 +245,7 @@ class ClusterBusTest {
     @DisplayName("记录始终携带主题 header —— 主题不能再依赖 key 承载")
     void recordAlwaysCarriesTopicHeader() {
         InternalMessage message = new InternalMessage("node-1", "c1", "sensor/room1/temp", 1,
-                new byte[0], false, false);
+                new byte[0], false, false, null);
 
         ProducerRecord<String, byte[]> record = ClusterRecords.toRecord("jmqtt-cluster", message);
 
@@ -257,7 +257,7 @@ class ClusterBusTest {
     @DisplayName("数据面可按设备分区: key=设备标识, 主题仍能从 header 还原")
     void uplinkRecordKeyedByDevice() {
         InternalMessage message = new InternalMessage("node-1", "device-42", "telemetry/raw", 1,
-                "23.5".getBytes(StandardCharsets.UTF_8), false, false);
+                "23.5".getBytes(StandardCharsets.UTF_8), false, false, null);
 
         // 按设备分区: 键是设备, 不是主题
         ProducerRecord<String, byte[]> record =
@@ -278,11 +278,11 @@ class ClusterBusTest {
         String sharedTopic = "telemetry/raw";
 
         ProducerRecord<String, byte[]> a1 = ClusterRecords.toRecord("jmqtt-uplink", "device-a",
-                new InternalMessage("node-1", "device-a", sharedTopic, 1, new byte[0], false, false));
+                new InternalMessage("node-1", "device-a", sharedTopic, 1, new byte[0], false, false, null));
         ProducerRecord<String, byte[]> a2 = ClusterRecords.toRecord("jmqtt-uplink", "device-a",
-                new InternalMessage("node-1", "device-a", sharedTopic, 1, new byte[0], false, false));
+                new InternalMessage("node-1", "device-a", sharedTopic, 1, new byte[0], false, false, null));
         ProducerRecord<String, byte[]> b1 = ClusterRecords.toRecord("jmqtt-uplink", "device-b",
-                new InternalMessage("node-1", "device-b", sharedTopic, 1, new byte[0], false, false));
+                new InternalMessage("node-1", "device-b", sharedTopic, 1, new byte[0], false, false, null));
 
         assertEquals(a1.key(), a2.key(), "同一设备必须落同一分区, 否则它自己的时序会错乱");
         assertNotEquals(a1.key(), b1.key(), "不同设备应散到不同分区, 否则吞吐被单分区锁死");
@@ -333,7 +333,7 @@ class ClusterBusTest {
     @DisplayName("key 为空但主题 header 存在时不丢消息")
     void codecAcceptsEmptyKeyWithTopicHeader() {
         ProducerRecord<String, byte[]> producerRecord =
-                ClusterRecords.toRecord("jmqtt-cluster", new InternalMessage("node-1", "c1", "a/b", 0, new byte[0], false, false));
+                ClusterRecords.toRecord("jmqtt-cluster", new InternalMessage("node-1", "c1", "a/b", 0, new byte[0], false, false, null));
         ConsumerRecord<String, byte[]> record = new ConsumerRecord<>("jmqtt-cluster", 0, 0L, null, producerRecord.value());
         producerRecord.headers().forEach(h -> record.headers().add(h));
 
@@ -471,7 +471,7 @@ class ClusterBusTest {
     // ------------------------------------------------------------------
 
     static InternalMessage message(String topic) {
-        return new InternalMessage("node-1", "c1", topic, 1, "payload".getBytes(StandardCharsets.UTF_8), false, false);
+        return new InternalMessage("node-1", "c1", topic, 1, "payload".getBytes(StandardCharsets.UTF_8), false, false, null);
     }
 
     /** 取一个 header 的字符串值(不存在时返回 null) */
@@ -511,7 +511,8 @@ class ClusterBusTest {
                 1,
                 "none",
                 "latest",
-                uplinkKey);
+                uplinkKey,
+                null, null, null);
     }
 
     /** 广播策略相关的配置: 直接暴露开关与过滤器 */
@@ -534,7 +535,8 @@ class ClusterBusTest {
                 1,
                 "none",
                 "latest",
-                "topic");
+                "topic",
+                null, null, null);
     }
 
     static BrokerProperties props(BrokerProperties.KafkaProperties kafka) {

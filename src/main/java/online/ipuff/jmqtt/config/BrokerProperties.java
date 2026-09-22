@@ -155,6 +155,17 @@ public record BrokerProperties(
      *                         有效上限是 topic 的分区数
      * @param compressionType  压缩算法, 如 lz4 / snappy / zstd / none
      * @param autoOffsetReset  无已提交 offset 时的起点, latest 或 earliest
+     * @param connectionEventTopic 连接事件(上线/下线)发布的专用 topic。
+     *                         留空(默认)关闭; 非空时 record 的 key=clientId
+     *                         (同一客户端的事件严格有序), value 为 JSON。
+     *                         供后台系统消费设备生命周期, 不参与集群消息面
+     * @param routes           多路由上行: 每条路由一组过滤器 + 目标 topic + 分区键,
+     *                         一条消息命中多条路由就各发一份。配置了 routes 时
+     *                         以它为准(旧的 uplink-topic 单路由配置被忽略);
+     *                         未命中任何路由的消息不发 Kafka, 只走集群广播
+     * @param downlink         下行通道: broker 消费这些 topic 并按本地订阅投递为
+     *                         MQTT 消息(每节点独立 group, 只做本地投递, 绝不回写
+     *                         集群或上行 —— 结构性防回环)。留空(默认)关闭
      */
     public record KafkaProperties(
             boolean enabled,
@@ -173,8 +184,37 @@ public record BrokerProperties(
             @DefaultValue("1") @Min(1) int consumerThreads,
             String compressionType,
             String autoOffsetReset,
-            String uplinkKey
+            String uplinkKey,
+            String connectionEventTopic,
+            List<Route> routes,
+            List<Downlink> downlink
     ) {
+
+        /**
+         * 上行路由: 过滤器命中的消息发到 {@code topic}, 分区键按 {@code key}
+         * ({@code topic} 或 {@code device}, 语义同 {@code uplink-key})。
+         */
+        public record Route(
+                List<String> filters,
+                @NotBlank String topic,
+                @DefaultValue("topic") String key
+        ) {
+
+            public boolean keyByDevice() {
+                return "device".equalsIgnoreCase(key);
+            }
+        }
+
+        /**
+         * 下行通道: broker 消费 {@code topic} 并按本地订阅投递;
+         * {@code qos} 是该通道投递使用的 QoS(record 可用 jmqtt-qos header 覆盖), 默认 0。
+         */
+        public record Downlink(
+                @NotBlank String topic,
+                @DefaultValue("0") @Min(0) int qos
+        ) {
+        }
+
 
         /**
          * 该节点实际使用的消费组 ID。

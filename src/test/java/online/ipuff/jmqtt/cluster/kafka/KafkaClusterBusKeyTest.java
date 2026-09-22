@@ -48,7 +48,7 @@ class KafkaClusterBusKeyTest {
 
     private static InternalMessage message(String clientId, String topic) {
         return new InternalMessage("node-1", clientId, topic, 1,
-                "x".getBytes(StandardCharsets.UTF_8), false, false);
+                "x".getBytes(StandardCharsets.UTF_8), false, false, null);
     }
 
     private static org.apache.kafka.clients.producer.ProducerRecord<String, byte[]>
@@ -62,7 +62,7 @@ class KafkaClusterBusKeyTest {
         BrokerProperties.KafkaProperties deviceKey = new BrokerProperties.KafkaProperties(
                 true, "127.0.0.1:9092", "jmqtt", "jmqtt-cluster", null,
                 true, List.of(), "", List.of(), false, 1000, 1000, 200, 1,
-                "none", "latest", "device");
+                "none", "latest", "device", null, null, null);
         KafkaClusterBus bus = bus(deviceKey);
 
         bus.publish(message("device-42", "sensor/room1/temp"));
@@ -78,7 +78,7 @@ class KafkaClusterBusKeyTest {
         BrokerProperties.KafkaProperties deviceKey = new BrokerProperties.KafkaProperties(
                 true, "127.0.0.1:9092", "jmqtt", "jmqtt-cluster", null,
                 true, List.of(), "jmqtt-uplink", List.of(), false, 1000, 1000, 200, 1,
-                "none", "latest", "device");
+                "none", "latest", "device", null, null, null);
         KafkaClusterBus bus = bus(deviceKey);
 
         bus.publishUplink(message("device-42", "sensor/room1/temp"));
@@ -93,7 +93,7 @@ class KafkaClusterBusKeyTest {
         BrokerProperties.KafkaProperties topicKey = new BrokerProperties.KafkaProperties(
                 true, "127.0.0.1:9092", "jmqtt", "jmqtt-cluster", null,
                 true, List.of(), "jmqtt-uplink", List.of(), false, 1000, 1000, 200, 1,
-                "none", "latest", "topic");
+                "none", "latest", "topic", null, null, null);
         KafkaClusterBus bus = bus(topicKey);
 
         bus.publishUplink(message("device-42", "sensor/room1/temp"));

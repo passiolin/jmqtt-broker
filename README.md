@@ -379,7 +379,8 @@ Broker 在这里的角色是**协议适配器**：MQTT 进、Kafka 出。
 
 | 配置 | 作用 |
 |---|---|
-| `uplink-topic` | 服务端读的 topic，与集群总线 topic 分开 |
+| `routes` | **多路由上行（推荐）**：每条路由一组 `filters` + 目标 `topic` + `key`（topic\|device），一条消息命中多条路由就各发一份；未命中任何路由不发 Kafka、只走集群广播。配置了 `routes` 时下面三个单路由项被取代 |
+| `uplink-topic` | 单路由形态（兼容保留）：服务端读的 topic，与集群总线 topic 分开 |
 | `uplink-filters` | 哪些主题算上行。建议显式列出，用「全部」会把下行指令也写进去 |
 | `uplink-exclusive` | 命中上行的消息**只**进数据面、不进集群广播。服务端直连 Kafka 时**应当打开** —— 集群里已经没有 MQTT 订阅者在等这些消息，不打开就是白白付出 N 倍扇出 |
 | `uplink-key` | 分区键。**遥测必须用 `device`** —— 见下 |
@@ -394,13 +395,69 @@ Broker 在这里的角色是**协议适配器**：MQTT 进、Kafka 出。
 持有那个分区的实例。**这个分区就是整条数据管道的吞吐上限**，而且是个很隐蔽的天花板：
 消费者数量上去了、CPU 却很闲。按设备分区则天然散开。
 
-记录格式（下游取设备身份不需要解析 payload）：
+记录格式（**只转发 PUBLISH 消息**；value 为 JSON 信封，设备身份不用解析 payload）：
 
 ```
-key      = 分区键(按 uplink-key 决定)
-value    = 原始 payload 字节, 不做任何编码包装
-headers  = jmqtt-topic / jmqtt-client-id / jmqtt-broker-id / jmqtt-qos / jmqtt-retain / jmqtt-dup
+key      = 分区键(按路由的 key 决定: topic 或设备标识)
+value    = JSON 信封(见下)
+headers  = jmqtt-kind = routed-publish
 ```
+
+```json
+{"username":"app-user","topic":"demo/LCU-P1/abc123def/event/up","timestamp":1789381061831,
+ "qos":1,"payload":"{\"cmd\":3041,\"requestId\":\"rpt-1\",\"data\":{}}",
+ "node":"broker-1","clientid":"device:LCU-P1:abc123def"}
+```
+
+- `payload` 是字符串化的消息体（二进制 payload 会被 UTF-8 有损解码；需要无损二进制请订阅 MQTT）
+- `node` 是接入节点标识（brokerId），`username` 缺失时省略该字段
+- 同 key（`key: device` 时即同设备）分区内严格有序
+
+### 连接事件（设备生命周期）
+
+`connection-event-topic`（留空关闭）：客户端上线/下线发布到专用 topic，
+后台按 key 追踪设备的完整在线状态机。
+
+```
+key      = clientid          # 同一客户端的事件严格有序
+value    = JSON
+headers  = jmqtt-kind = client-event
+```
+
+```json
+{"proto_ver":4,"proto_name":"MQTT","peername":"10.0.0.9:47414","node":"broker-1",
+ "connected_at":1788989660509,"clientid":"app:PAD-x:abc123def","action":"connected"}
+
+{"username":"app-user","reason":"tcp_closed","proto_ver":4,"proto_name":"MQTT",
+ "peername":"10.0.0.9:51166","node":"broker-1","disconnected_at":1788982685781,
+ "clientid":"app:PAD-x:abc123def","action":"disconnected"}
+```
+
+`reason`：`closed` = 客户端主动 DISCONNECT；`tcp_closed` = 连接断开 / 心跳超时 / 被接管。
+被接管时旧连接的关闭**不**产生 disconnected 事件（客户端马上以新连接出现在事件流里），
+一个 clientid 在同一时刻只有一条有效状态。发布走有界队列 ——
+重启引发的重连风暴不会阻塞连接路径。
+
+### 下行通道（后台 → 设备）
+
+`downlink`（留空关闭）：broker 消费这些 topic 并按**本地订阅**投递为 MQTT 消息。
+这是后台给设备下发指令的 Kafka 通道，与集群消息面完全隔离。
+
+```json
+{"topic":"demo/LCU-P1/abc123def/property/down","qos":1,
+ "payload":"{\"cmd\":3011,\"requestId\":\"req-1\",\"data\":{}}"}
+```
+
+`topic` 必填；`qos` 缺省时用通道配置的默认值；`payload` 字符串按 UTF-8 编码为 MQTT 消息体。
+record 的 key 仅用于分区，不参与解码。
+
+三条结构性保证：
+
+- **每节点独立 group**（`<groupId>-downlink`）：持有订阅者的节点投递，其他节点空转 ——
+  设备连在哪个节点，指令就能从哪个节点下去
+- **只做本地投递，绝不回写出站**：后台从上行拿到消息再下发（或设备侧回执）不会绕回 Kafka，
+  回环从结构上不存在
+- **至少一次**：处理完一批才提交位点，与集群消息面同一语义
 
 > 注意：主题现在走 header（`jmqtt-topic`），**不再由 key 承载** ——
 > 因为按设备分区时 key 已经不是主题了。消费端优先读 header，读不到才回退到 key。

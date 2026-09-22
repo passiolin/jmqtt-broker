@@ -13,6 +13,8 @@
  */
 package online.ipuff.jmqtt.cluster.kafka;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import online.ipuff.jmqtt.cluster.ConnectionEvent;
 import online.ipuff.jmqtt.cluster.InternalMessage;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.producer.ProducerRecord;
@@ -72,6 +74,11 @@ public final class ClusterRecords {
 
     public static final String KIND_PUBLISH = "publish";
     public static final String KIND_TAKEOVER = "takeover";
+    public static final String KIND_CLIENT_EVENT = "client-event";
+    public static final String KIND_ROUTED_PUBLISH = "routed-publish";
+
+    /** 连接事件的 JSON 编解码器(事件体是给外部系统消费的, 走 JSON 而不是 header 编码) */
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private ClusterRecords() {
     }
@@ -160,6 +167,141 @@ public final class ClusterRecords {
         return record;
     }
 
+    /**
+     * 数据面上行信封 —— 后台消费的 JSON 契约(只含 PUBLISH 消息)。
+     * 字段名与既有后台的消费格式对齐; username 缺失时省略。
+     */
+    public record RoutedEnvelope(
+            String username,
+            String topic,
+            long timestamp,
+            int qos,
+            String payload,
+            String node,
+            String clientid
+    ) {
+    }
+
+    /**
+     * 编码数据面上行记录: value 为 JSON 信封, key 由路由决定(topic 或设备标识)。
+     * payload 以 UTF-8 字符串承载 —— 二进制 payload 会被有损解码(替换字符),
+     * 需要无损传输二进制的场景应直接订阅 MQTT 而不是走数据面。
+     */
+    public static ProducerRecord<String, byte[]> toRoutedRecord(
+            String kafkaTopic, String partitionKey, InternalMessage message) {
+        RoutedEnvelope envelope = new RoutedEnvelope(
+                message.username(),
+                message.topic(),
+                System.currentTimeMillis(),
+                message.qos(),
+                message.payload() == null ? "" : new String(message.payload(), StandardCharsets.UTF_8),
+                message.brokerId(),
+                message.clientId());
+        byte[] body;
+        try {
+            body = JSON.writeValueAsString(envelope).getBytes(StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            throw new IllegalStateException("上行信封序列化失败", e);
+        }
+        ProducerRecord<String, byte[]> record =
+                new ProducerRecord<>(kafkaTopic, partitionKey, body);
+        record.headers().add(HEADER_KIND, utf8(KIND_ROUTED_PUBLISH));
+        return record;
+    }
+
+    /**
+     * 下行记录的 JSON 契约: {topic, qos?, payload}。
+     * qos 缺省时用通道配置的默认值; payload 是字符串, 按 UTF-8 编码为 MQTT 消息体。
+     */
+    public record DownlinkEnvelope(
+            String topic,
+            Integer qos,
+            String payload
+    ) {
+    }
+
+    /**
+     * 编码连接事件。value 是 JSON(后台直接反序列化), key=clientId。
+     */
+    public static ProducerRecord<String, byte[]> connectionEventRecord(
+            String kafkaTopic, ConnectionEvent event) {
+        byte[] body;
+        try {
+            body = JSON.writeValueAsString(event).getBytes(StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            throw new IllegalStateException("连接事件序列化失败", e);
+        }
+        ProducerRecord<String, byte[]> record =
+                new ProducerRecord<>(kafkaTopic, event.clientid(), body);
+        record.headers().add(HEADER_KIND, utf8(KIND_CLIENT_EVENT));
+        return record;
+    }
+
+    /**
+     * 解码上行 JSON 信封(测试与诊断用; 后台直接反序列化同结构 JSON)。
+     *
+     * @return 信封; value 不是合法信封时返回 {@code null}
+     */
+    public static RoutedEnvelope routedEnvelope(ProducerRecord<String, byte[]> record) {
+        if (record.value() == null) {
+            return null;
+        }
+        try {
+            return JSON.readValue(record.value(), RoutedEnvelope.class);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 解码连接事件。
+     *
+     * @return 事件; body 不是合法事件时返回 {@code null}
+     */
+    public static ConnectionEvent connectionEvent(ConsumerRecord<String, byte[]> record) {
+        if (record.value() == null) {
+            return null;
+        }
+        try {
+            return JSON.readValue(record.value(), ConnectionEvent.class);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 解码下行记录(后台 → broker)。
+     *
+     * <p>JSON 契约: {@code {topic, qos?, payload}} —— qos 缺省用通道配置的默认值,
+     * payload 字符串按 UTF-8 编码为 MQTT 消息体。clientId 恒为 null ——
+     * 下行消息没有来源客户端, 不得因此排除任何订阅者。
+     *
+     * @return 内部消息; JSON 非法或 topic 缺失时返回 {@code null}, 调用方应丢弃该记录
+     */
+    public static InternalMessage downlinkMessage(ConsumerRecord<String, byte[]> record, int defaultQos) {
+        if (record.value() == null) {
+            return null;
+        }
+        DownlinkEnvelope envelope;
+        try {
+            envelope = JSON.readValue(record.value(), DownlinkEnvelope.class);
+        } catch (Exception e) {
+            return null;
+        }
+        if (envelope == null || envelope.topic() == null || envelope.topic().isEmpty()) {
+            return null;
+        }
+        return new InternalMessage(
+                "",
+                null,
+                envelope.topic(),
+                envelope.qos() != null ? envelope.qos() : defaultQos,
+                envelope.payload() == null ? new byte[0] : envelope.payload().getBytes(StandardCharsets.UTF_8),
+                false,
+                false,
+                null);
+    }
+
     // ------------------------------------------------------------------
     // 解码
     // ------------------------------------------------------------------
@@ -197,7 +339,7 @@ public final class ClusterRecords {
                 unsignedByte(record.headers(), HEADER_QOS),
                 record.value() == null ? new byte[0] : record.value(),
                 unsignedByte(record.headers(), HEADER_RETAIN) == 1,
-                unsignedByte(record.headers(), HEADER_DUP) == 1);
+                unsignedByte(record.headers(), HEADER_DUP) == 1, null);
     }
 
     /**
@@ -233,5 +375,10 @@ public final class ClusterRecords {
             return 0;
         }
         return header.value()[0] & 0xFF;
+    }
+
+    private static boolean hasHeader(Headers headers, String key) {
+        Header header = headers.lastHeader(key);
+        return header != null && header.value() != null && header.value().length > 0;
     }
 }

@@ -305,7 +305,7 @@ class InternalSendServerTest {
 
     private static InternalMessage messageWithPayload(int qos, String body) {
         return new InternalMessage((PROP_NODE), PUBLISHER, TOPIC, qos,
-                body.getBytes(StandardCharsets.UTF_8), false, false);
+                body.getBytes(StandardCharsets.UTF_8), false, false, null);
     }
 
     private static final String PROP_NODE = "node-1";
@@ -319,7 +319,7 @@ class InternalSendServerTest {
         BrokerProperties.KafkaProperties kafka = new BrokerProperties.KafkaProperties(
                 false, "127.0.0.1:9092", "jmqtt", "jmqtt-cluster", null,
                 true, List.of(),
-                "", List.of(), false, 1000, 1000, 200, 1, "none", "latest", "topic");
+                "", List.of(), false, 1000, 1000, 200, 1, "none", "latest", "topic", null, null, null);
         BrokerProperties.RedisProperties redis = new BrokerProperties.RedisProperties(
                 false, "127.0.0.1", 6379, null, 0, "jmqtt", 1000, 5000, "off", 100, 10000, "standalone", null, null);
         return new BrokerProperties(

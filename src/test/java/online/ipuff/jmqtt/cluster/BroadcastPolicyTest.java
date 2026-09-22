@@ -160,6 +160,7 @@ class BroadcastPolicyTest {
                 1,
                 "none",
                 "latest",
-                "topic");
+                "topic",
+                null, null, null);
     }
 }

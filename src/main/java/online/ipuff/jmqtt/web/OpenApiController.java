@@ -126,7 +126,7 @@ public class OpenApiController {
         try {
             // clientId 置空: 服务端下发不针对特定发布者, 无需排除自身
             InternalMessage message = internalCommunication.fromLocal(
-                    null, request.topic(), qos, payload, false, request.dup() != null && request.dup());
+                    null, request.topic(), qos, payload, false, request.dup() != null && request.dup(), null);
 
             int delivered = internalSendServer.sendPublishMessage(message);
             internalCommunication.internalSend(message);

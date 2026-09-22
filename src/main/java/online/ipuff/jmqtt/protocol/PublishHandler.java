@@ -220,7 +220,8 @@ public class PublishHandler {
         // 投递给本地订阅者时 retain 置 false ——
         // 规范要求只有「因新订阅而投递的保留消息」才置 retain=1
         InternalMessage internalMessage =
-                internalCommunication.fromLocal(clientId, topic, qos, payload, false, false);
+                internalCommunication.fromLocal(clientId, topic, qos, payload, false, false,
+                channel.attr(ChannelAttributes.USERNAME).get());
 
         int delivered = internalSendServer.sendPublishMessage(internalMessage);
 

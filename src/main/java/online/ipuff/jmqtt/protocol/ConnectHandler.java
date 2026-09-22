@@ -345,6 +345,13 @@ public class ConnectHandler {
         // 放在这里而不是更早, 是因为它要读到连接上的全部属性(版本/心跳/时间/发送缓冲)
         // 以及已恢复的订阅 —— 早于恢复订阅就会上报成「零订阅」。
         adminStatePublisher.clientOnline(clientId, channel);
+        // 连接事件(上线): key=clientId 有序, 只入有界队列不阻塞连接路径
+        clusterBus.publishConnectionEvent(online.ipuff.jmqtt.cluster.ConnectionEvent.connected(
+                clientId,
+                channel.attr(ChannelAttributes.USERNAME).get(),
+                options.isV5() ? 5 : 4,
+                ChannelAttributes.peernameOf(channel),
+                properties.id()));
 
         // 9) 需要保留的会话才做恢复投递: 在途重发 + 离线积压
         if (session.isPersistent()) {

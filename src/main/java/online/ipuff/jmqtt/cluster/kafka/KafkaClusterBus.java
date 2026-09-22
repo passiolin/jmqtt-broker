@@ -15,6 +15,7 @@ package online.ipuff.jmqtt.cluster.kafka;
 
 import online.ipuff.jmqtt.cluster.ClusterBus;
 import online.ipuff.jmqtt.cluster.ClusterBusStats;
+import online.ipuff.jmqtt.cluster.ConnectionEvent;
 import online.ipuff.jmqtt.cluster.InternalMessage;
 import online.ipuff.jmqtt.cluster.InternalSendServer;
 import online.ipuff.jmqtt.cluster.TakeoverListener;
@@ -109,6 +110,12 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
     private volatile boolean uplinkAll;
 
     /**
+     * 多路由上行(routes 配置)。非空时取代单路由的 uplink-topic:
+     * 一条消息命中多条路由就各发一份, 每条路由有自己的目标 topic 与分区键。
+     */
+    private final java.util.List<RouteMatcher> routeMatchers = new java.util.ArrayList<>();
+
+    /**
      * 广播过滤器匹配树。与上行过滤器共用同一套通配符语义(而不是字符串前缀判断) ——
      * 配 {@code device/+/telemetry} 就应该真的按 MQTT 通配符匹配,
      * 否则「配置写的」和「实际执行的」是两回事。
@@ -129,6 +136,10 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
     /** 消费 worker 数(consumer-threads); 用于指标展示, 启动时确定 */
     private volatile int workerCount;
 
+    /** 下行消费者(后台 → broker): 每节点独立 group, 只做本地投递 */
+    private volatile KafkaConsumer<String, byte[]> downlinkConsumer;
+    private volatile Thread downlinkThread;
+
     private final AtomicLong publishedCount = new AtomicLong();
     private final AtomicLong droppedCount = new AtomicLong();
     private final AtomicLong receivedCount = new AtomicLong();
@@ -146,6 +157,26 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
         this.outbox = new ArrayBlockingQueue<>(properties.kafka().queueCapacity());
         initUplinkMatcher();
         initBroadcastMatcher();
+        initRouteMatchers();
+    }
+
+    /** 解析多路由上行配置; 非法过滤器忽略并告警(与广播过滤器同一口径) */
+    private void initRouteMatchers() {
+        java.util.List<BrokerProperties.KafkaProperties.Route> routes = properties.kafka().routes();
+        if (routes == null || routes.isEmpty()) {
+            return;
+        }
+        for (BrokerProperties.KafkaProperties.Route route : routes) {
+            if (route.topic() == null || route.topic().isBlank()) {
+                log.warn("忽略未配置 topic 的上行路由: {}", route);
+                continue;
+            }
+            routeMatchers.add(new RouteMatcher(route));
+        }
+        if (!routeMatchers.isEmpty()) {
+            log.info("上行多路由已启用: {} 条(routes 配置取代 uplink-topic 单路由)",
+                    routeMatchers.size());
+        }
     }
 
     /**
@@ -241,11 +272,22 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
 
     @Override
     public boolean uplinkEnabled() {
-        return properties.kafka().uplinkEnabled();
+        return !routeMatchers.isEmpty() || properties.kafka().uplinkEnabled();
     }
 
     @Override
     public boolean isUplink(String topic) {
+        if (!routeMatchers.isEmpty()) {
+            if (topic == null || topic.isEmpty()) {
+                return false;
+            }
+            for (RouteMatcher matcher : routeMatchers) {
+                if (matcher.matches(topic)) {
+                    return true;
+                }
+            }
+            return false;
+        }
         if (!uplinkEnabled() || topic == null || topic.isEmpty()) {
             return false;
         }
@@ -278,6 +320,24 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
 
     @Override
     public void publishUplink(InternalMessage message) {
+        // 多路由: 命中一条发一份, 命中多条发多份; 每条路由有自己的分区键
+        if (!routeMatchers.isEmpty()) {
+            int sent = 0;
+            for (RouteMatcher matcher : routeMatchers) {
+                if (!matcher.matches(message.topic())) {
+                    continue;
+                }
+                String key = matcher.route.keyByDevice()
+                        && message.clientId() != null && !message.clientId().isBlank()
+                        ? message.clientId() : message.topic();
+                enqueue(ClusterRecords.toRoutedRecord(matcher.route.topic(), key, message), message.topic());
+                sent++;
+            }
+            if (sent > 0) {
+                uplinkCount.incrementAndGet();
+            }
+            return;
+        }
         uplinkCount.incrementAndGet();
         String topic = properties.kafka().uplinkTopic();
         if (topic == null || topic.isEmpty()) {
@@ -285,7 +345,18 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
         }
         // 数据面分区键按 uplink-key 配置: topic(默认)或 device(每设备自身时序有序 + 流量散开)
         String partitionKey = properties.kafka().uplinkPartitionKey(message.clientId(), message.topic());
-        enqueue(ClusterRecords.toRecord(topic, partitionKey, message), message.topic());
+        enqueue(ClusterRecords.toRoutedRecord(topic, partitionKey, message), message.topic());
+    }
+
+    @Override
+    public void publishConnectionEvent(ConnectionEvent event) {
+        String topic = properties.kafka().connectionEventTopic();
+        if (topic == null || topic.isEmpty()) {
+            return;
+        }
+        // key=clientId 由 connectionEventRecord 保证: 同一客户端的事件严格有序
+        enqueue(ClusterRecords.connectionEventRecord(topic, event),
+                "connection-event:" + event.action() + ":" + event.clientid());
     }
 
     @Override
@@ -371,6 +442,8 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
         this.consumerThread.setDaemon(true);
         this.consumerThread.start();
 
+        startDownlinkIfNeeded(kafka, brokerId);
+
         log.info("Kafka 集群总线已启动: clusterTopic={} groupId={} consumerThreads={} uplinkTopic={} uplinkExclusive={}",
                 kafka.clusterTopic(), kafka.resolvedGroupId(brokerId), workerCount,
                 kafka.uplinkEnabled() ? kafka.uplinkTopic() : "(未启用)",
@@ -390,8 +463,12 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
         if (consumer != null) {
             consumer.wakeup();
         }
+        if (downlinkConsumer != null) {
+            downlinkConsumer.wakeup();
+        }
         joinQuietly(consumerThread);
         joinQuietly(senderThread);
+        joinQuietly(downlinkThread);
 
         // 停止前尽力把队列里剩下的消息发出去
         try {
@@ -668,6 +745,148 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
     }
 
     // ------------------------------------------------------------------
+    // 下行消费(后台 → broker)
+    // ------------------------------------------------------------------
+
+    /**
+     * 按配置启动下行通道。每个通道一条约定的 record 契约:
+     * key(或 jmqtt-topic header)= 目标 MQTT 主题, value = payload,
+     * 可选 jmqtt-qos / jmqtt-retain header 覆盖通道默认值。
+     */
+    private void startDownlinkIfNeeded(BrokerProperties.KafkaProperties kafka, String brokerId) {
+        java.util.List<String> topics = new java.util.ArrayList<>();
+        for (BrokerProperties.KafkaProperties.Downlink downlink : downlinksOf(kafka)) {
+            topics.add(downlink.topic());
+        }
+        if (topics.isEmpty()) {
+            return;
+        }
+        Map<String, Object> cfg = consumerConfig(kafka, brokerId);
+        cfg.put(ConsumerConfig.GROUP_ID_CONFIG, kafka.resolvedGroupId(brokerId) + "-downlink");
+        cfg.put(ConsumerConfig.CLIENT_ID_CONFIG, prefix(kafka) + "-" + brokerId + "-downlink");
+        this.downlinkConsumer = new KafkaConsumer<>(cfg);
+        this.downlinkConsumer.subscribe(topics);
+        this.downlinkThread = new Thread(this::downlinkLoop, "jmqtt-kafka-downlink");
+        this.downlinkThread.setDaemon(true);
+        this.downlinkThread.start();
+        log.info("下行通道已启动: topics={} groupId={}(每节点独立, 只做本地投递)",
+                topics, kafka.resolvedGroupId(brokerId) + "-downlink");
+    }
+
+    /** 过滤出合法的下行通道配置 */
+    private static java.util.List<BrokerProperties.KafkaProperties.Downlink> downlinksOf(
+            BrokerProperties.KafkaProperties kafka) {
+        java.util.List<BrokerProperties.KafkaProperties.Downlink> result = new java.util.ArrayList<>();
+        if (kafka.downlink() == null) {
+            return result;
+        }
+        for (BrokerProperties.KafkaProperties.Downlink downlink : kafka.downlink()) {
+            if (downlink.topic() == null || downlink.topic().isBlank()) {
+                log.warn("忽略未配置 topic 的下行通道: {}", downlink);
+                continue;
+            }
+            result.add(downlink);
+        }
+        return result;
+    }
+
+    /**
+     * 下行消费循环。串行处理(指令类流量天然低频, 复用 worker 池是后手),
+     * 处理完一批再手动提交 —— 与消息面同一至少一次语义。
+     *
+     * <p><b>回环防护是结构性的</b>: 这里只调用
+     * {@link InternalSendServer#sendPublishMessage} 做本地投递,
+     * 绝不经过出站路径 —— 后台从上行拿到消息再下发, 不会绕回 Kafka。
+     */
+    private void downlinkLoop() {
+        KafkaConsumer<String, byte[]> c = downlinkConsumer;
+        if (c == null) {
+            return;
+        }
+        Duration pollTimeout = Duration.ofMillis(properties.kafka().pollTimeoutMs());
+        try {
+            while (running) {
+                ConsumerRecords<String, byte[]> records = c.poll(pollTimeout);
+                if (records.isEmpty()) {
+                    continue;
+                }
+                for (ConsumerRecord<String, byte[]> record : records) {
+                    handleDownlink(record);
+                }
+                Map<TopicPartition, OffsetAndMetadata> offsets = new HashMap<>();
+                records.partitions().forEach(tp ->
+                        offsets.put(tp, new OffsetAndMetadata(c.position(tp))));
+                c.commitSync(offsets);
+            }
+        } catch (WakeupException e) {
+            if (running) {
+                log.warn("下行消费线程被意外唤醒", e);
+            }
+        } catch (Exception e) {
+            log.error("下行消费线程异常退出, 后台下发消息将不再被接收", e);
+        }
+    }
+
+    private void handleDownlink(ConsumerRecord<String, byte[]> record) {
+        int defaultQos = 0;
+        for (BrokerProperties.KafkaProperties.Downlink downlink : downlinksOf(properties.kafka())) {
+            if (downlink.topic().equals(record.topic())) {
+                defaultQos = downlink.qos();
+                break;
+            }
+        }
+        InternalMessage message = ClusterRecords.downlinkMessage(record, defaultQos);
+        if (message == null) {
+            log.debug("丢弃无法解码的下行记录: topic={} offset={}", record.topic(), record.offset());
+            return;
+        }
+        if (internalSendServer == null) {
+            return;
+        }
+        int delivered = internalSendServer.sendPublishMessage(message);
+        if (log.isDebugEnabled()) {
+            log.debug("下行消息投递: kafkaTopic={} mqttTopic={} 本地投递={}",
+                    record.topic(), message.topic(), delivered);
+        }
+    }
+
+    /**
+     * 单条上行路由的匹配器: 过滤器树 + 目标 topic + 分区键策略。
+     * 过滤器列表为空视为「全部命中」(与上行/广播过滤器的语义一致)。
+     */
+    private static final class RouteMatcher {
+
+        final BrokerProperties.KafkaProperties.Route route;
+        private final TopicTrie<Boolean> trie = new TopicTrie<>();
+        private final boolean matchAll;
+
+        RouteMatcher(BrokerProperties.KafkaProperties.Route route) {
+            this.route = route;
+            java.util.List<String> filters = route.filters();
+            if (filters == null || filters.isEmpty()) {
+                this.matchAll = true;
+            } else {
+                this.matchAll = false;
+                for (String filter : filters) {
+                    if (!MqttTopic.isValidFilter(filter)) {
+                        log.warn("忽略非法的上行路由过滤器: {}", filter);
+                        continue;
+                    }
+                    trie.insert(MqttTopic.levels(filter), filter, Boolean.TRUE);
+                }
+            }
+        }
+
+        boolean matches(String topic) {
+            if (matchAll) {
+                return true;
+            }
+            return topic != null && !topic.isEmpty()
+                    && !trie.matchTopic(MqttTopic.levels(topic), null).isEmpty();
+        }
+    }
+
+    // ------------------------------------------------------------------
     // 配置
     // ------------------------------------------------------------------
 
@@ -726,6 +945,15 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
                 c.close(Duration.ofSeconds(3));
             } catch (Exception e) {
                 log.debug("关闭 consumer 异常", e);
+            }
+        }
+        KafkaConsumer<String, byte[]> d = downlinkConsumer;
+        downlinkConsumer = null;
+        if (d != null) {
+            try {
+                d.close(Duration.ofSeconds(3));
+            } catch (Exception e) {
+                log.debug("关闭下行 consumer 异常", e);
             }
         }
     }

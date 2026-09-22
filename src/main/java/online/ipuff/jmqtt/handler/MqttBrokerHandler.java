@@ -78,6 +78,7 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
     private final IRetainMessageStoreService retainMessageStoreService;
     private final AdminStatePublisher adminStatePublisher;
     private final online.ipuff.jmqtt.authz.IAclService aclService;
+    private final online.ipuff.jmqtt.cluster.ClusterBus clusterBus;
 
     public MqttBrokerHandler(ProtocolProcessor protocolProcessor,
                              ConnectionRegistry connectionRegistry,
@@ -86,7 +87,8 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
                              InternalSendServer internalSendServer,
                              IRetainMessageStoreService retainMessageStoreService,
                              AdminStatePublisher adminStatePublisher,
-                             online.ipuff.jmqtt.authz.IAclService aclService) {
+                             online.ipuff.jmqtt.authz.IAclService aclService,
+                             online.ipuff.jmqtt.cluster.ClusterBus clusterBus) {
         this.protocolProcessor = protocolProcessor;
         this.connectionRegistry = connectionRegistry;
         this.sessionStoreService = sessionStoreService;
@@ -95,6 +97,7 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
         this.retainMessageStoreService = retainMessageStoreService;
         this.adminStatePublisher = adminStatePublisher;
         this.aclService = aclService;
+        this.clusterBus = clusterBus;
     }
 
     @Override
@@ -159,6 +162,21 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
             // 刚接管它的新连接从视图里删掉 —— 客户端明明在线, 控制台上却消失了。
             if (removed) {
                 adminStatePublisher.clientOffline(clientId);
+                // 连接事件(下线): 只在「该 clientId 的在线状态真正结束」时发布 ——
+                // 被接管时旧连接的关闭不构成下线(客户端马上以新连接出现在事件流里)
+                clusterBus.publishConnectionEvent(
+                        online.ipuff.jmqtt.cluster.ConnectionEvent.disconnected(
+                                clientId,
+                                channel.attr(ChannelAttributes.USERNAME).get(),
+                                Boolean.TRUE.equals(
+                                        channel.attr(ChannelAttributes.PROTOCOL_VERSION).get()
+                                                == io.netty.handler.codec.mqtt.MqttVersion.MQTT_5) ? 5 : 4,
+                                ChannelAttributes.peernameOf(channel),
+                                null,
+                                Boolean.TRUE.equals(
+                                        channel.attr(ChannelAttributes.GRACEFUL_DISCONNECT).get())
+                                        ? online.ipuff.jmqtt.cluster.ConnectionEvent.REASON_CLOSED
+                                        : online.ipuff.jmqtt.cluster.ConnectionEvent.REASON_TCP_CLOSED));
             }
             // ACL 决策缓存随连接释放(无论是否被接管 —— 新连接有自己的缓存条目)
             aclService.onClientOffline(clientId);
@@ -252,7 +270,8 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
 
         try {
             InternalMessage message = internalCommunication.fromLocal(
-                    null, will.topic(), will.qos(), will.payload(), false, false);
+                    null, will.topic(), will.qos(), will.payload(), false, false,
+                    channel.attr(ChannelAttributes.USERNAME).get());
             internalSendServer.sendPublishMessage(message);
             internalCommunication.internalSend(message);
 
