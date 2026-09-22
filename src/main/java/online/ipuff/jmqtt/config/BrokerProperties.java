@@ -206,12 +206,13 @@ public record BrokerProperties(
         }
 
         /**
-         * 下行通道: broker 消费 {@code topic} 并按本地订阅投递;
-         * {@code qos} 是该通道投递使用的 QoS(record 可用 jmqtt-qos header 覆盖), 默认 0。
+         * 下行通道: broker 消费 {@code topic} 并按本地订阅投递。
+         * {@code qos} 是该通道的投递 QoS(默认 1 —— 下行都是指令类, PUBACK 确认送达;
+         * 高频可容忍丢失的通道显式配 0)。消息体不带 QoS, 通道即粒度。
          */
         public record Downlink(
                 @NotBlank String topic,
-                @DefaultValue("0") @Min(0) int qos
+                @DefaultValue("1") @Min(0) int qos
         ) {
         }
 

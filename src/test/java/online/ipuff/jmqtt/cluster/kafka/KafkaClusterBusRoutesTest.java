@@ -189,7 +189,7 @@ class KafkaClusterBusRoutesTest {
     }
 
     @Test
-    @DisplayName("下行 JSON 契约: {topic, payload} 走通道默认 QoS, qos 字段可覆盖")
+    @DisplayName("下行 JSON 契约: {topic, payload}; QoS 只来自通道配置")
     void downlinkJsonContract() {
         // 最小契约: 只给 topic 和 payload
         ConsumerRecord<String, byte[]> minimal = new ConsumerRecord<>(
@@ -197,15 +197,20 @@ class KafkaClusterBusRoutesTest {
                 "{\"topic\":\"cmd/device-42\",\"payload\":\"hello\"}".getBytes(StandardCharsets.UTF_8));
         InternalMessage decoded = ClusterRecords.downlinkMessage(minimal, 1);
         assertEquals("cmd/device-42", decoded.topic());
-        assertEquals(1, decoded.qos(), "qos 缺省用通道配置的默认值");
+        assertEquals(1, decoded.qos(), "投递 QoS 一律取通道配置");
         assertEquals("hello", new String(decoded.payload(), StandardCharsets.UTF_8));
         assertNull(decoded.clientId(), "下行消息无来源客户端, 不得排除任何订阅者");
 
-        // qos 显式覆盖
-        ConsumerRecord<String, byte[]> withQos = new ConsumerRecord<>(
+        // 历史消息里带 qos: 仍可解析, 但不再生效(通道配置唯一)
+        ConsumerRecord<String, byte[]> legacy = new ConsumerRecord<>(
                 "backend-commands", 0, 0L, "unused-key",
                 "{\"topic\":\"cmd/device-42\",\"qos\":2,\"payload\":\"hi\"}".getBytes(StandardCharsets.UTF_8));
-        assertEquals(2, ClusterRecords.downlinkMessage(withQos, 1).qos());
+        InternalMessage legacyDecoded = ClusterRecords.downlinkMessage(legacy, 1);
+        assertEquals(1, legacyDecoded.qos(), "消息里的 qos 被忽略");
+        assertEquals("hi", new String(legacyDecoded.payload(), StandardCharsets.UTF_8));
+
+        // 通道配 0 则 0
+        assertEquals(0, ClusterRecords.downlinkMessage(minimal, 0).qos());
 
         // 非法 JSON / 缺 topic → 丢弃
         ConsumerRecord<String, byte[]> bad = new ConsumerRecord<>(

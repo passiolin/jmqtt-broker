@@ -176,7 +176,6 @@ jmqtt:
       #     topic: signaling
       #     key: topic
       routes: []
-
       # ---- 连接事件(设备生命周期) ----
       # 客户端上线/下线发布到该 topic(留空关闭)。key=clientId, 同一客户端的事件严格有序。
       # value 是 JSON; reason: closed=主动 DISCONNECT, tcp_closed=断连/心跳超时/被接管:
@@ -189,15 +188,15 @@ jmqtt:
 
       # ---- 下行通道(后台 → broker) ----
       # broker 消费这些 topic 并按本地订阅投递为 MQTT 消息(每节点独立 group)。
-      # value 是 JSON: {"topic":"demo/LCU-P1/abc123/property/down","qos":1,"payload":"{\"cmd\":3011}"}
-      # qos 缺省时用该通道配置的默认值; key 仅用于分区, 不参与解码。
+      # value 是 JSON: {"topic":"demo/LCU-P1/abc123/property/down","payload":"{\"cmd\":3011}"
+      # 投递 QoS 是通道级策略(默认 1, 指令类要 PUBACK 确认; 可丢弃通道配 0), 消息体不携带;
       # 只做本地投递、绝不回写 Kafka —— 结构性防回环。示例:
       # downlink:
       #   - topic: backend-commands
-      #   - topic: ota-jobs
-      #     qos: 1
+      #   - topic: ota-status-push
+      #     qos: 0
       downlink: []
-
+          qos: 1
       # ---- 生产者 ----
       # Kafka 不可用时的最长阻塞。必须设小, 否则会卡住 MQTT 发布路径
       max-block-ms: 1000
@@ -233,12 +232,13 @@ jmqtt:
     #     # 集群只有 db0, database 必须为 0(非 0 启动即失败)
     redis:
       enabled: ${JMQTT_REDIS_ENABLED:false}
+      host: ${JMQTT_REDIS_HOST:127.0.0.1}
       # standalone(默认) | sentinel | cluster
       mode: ${JMQTT_REDIS_MODE:standalone}
-      host: ${JMQTT_REDIS_HOST:127.0.0.1}
       port: ${JMQTT_REDIS_PORT:6379}
       password: ${JMQTT_REDIS_PASSWORD:}
       database: ${JMQTT_REDIS_DATABASE:0}
+      master-id: ${JMQTT_REDIS_MASTER_ID:}
       # 哨兵/集群节点列表(host:port); 环境变量可用逗号分隔:
       # JMQTT_REDIS_NODES=10.0.0.6:26379,10.0.0.7:26379
       nodes: []

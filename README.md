@@ -444,12 +444,14 @@ headers  = jmqtt-kind = client-event
 这是后台给设备下发指令的 Kafka 通道，与集群消息面完全隔离。
 
 ```json
-{"topic":"demo/LCU-P1/abc123def/property/down","qos":1,
+{"topic":"demo/LCU-P1/abc123def/property/down",
  "payload":"{\"cmd\":3011,\"requestId\":\"req-1\",\"data\":{}}"}
 ```
 
-`topic` 必填；`qos` 缺省时用通道配置的默认值；`payload` 字符串按 UTF-8 编码为 MQTT 消息体。
-record 的 key 仅用于分区，不参与解码。
+`topic` 必填；`payload` 字符串按 UTF-8 编码为 MQTT 消息体；record 的 key 仅用于分区。
+**投递 QoS 是通道级运维策略**（`downlink` 项的 `qos`，默认 1 —— 指令类消息要 PUBACK
+确认送达，高频可容忍丢失的通道显式配 0），消息体不携带；历史消息里的 `qos` 字段
+仍可解析但不再生效。
 
 三条结构性保证：
 
