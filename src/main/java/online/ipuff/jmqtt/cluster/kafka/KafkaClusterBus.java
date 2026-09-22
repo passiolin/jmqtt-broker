@@ -828,14 +828,7 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
     }
 
     private void handleDownlink(ConsumerRecord<String, byte[]> record) {
-        int defaultQos = 0;
-        for (BrokerProperties.KafkaProperties.Downlink downlink : downlinksOf(properties.kafka())) {
-            if (downlink.topic().equals(record.topic())) {
-                defaultQos = downlink.qos();
-                break;
-            }
-        }
-        InternalMessage message = ClusterRecords.downlinkMessage(record, defaultQos);
+        InternalMessage message = ClusterRecords.downlinkMessage(record);
         if (message == null) {
             log.debug("丢弃无法解码的下行记录: topic={} offset={}", record.topic(), record.offset());
             return;

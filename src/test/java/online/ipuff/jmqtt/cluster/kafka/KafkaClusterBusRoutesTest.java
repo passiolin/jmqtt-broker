@@ -189,35 +189,30 @@ class KafkaClusterBusRoutesTest {
     }
 
     @Test
-    @DisplayName("下行 JSON 契约: {topic, payload}; QoS 只来自通道配置")
+    @DisplayName("下行 JSON 契约: {topic, qos?, payload}; QoS 以消息为准, 缺省 1")
     void downlinkJsonContract() {
-        // 最小契约: 只给 topic 和 payload
+        // 消息带 qos: 以消息为准
+        ConsumerRecord<String, byte[]> withQos = new ConsumerRecord<>(
+                "backend-commands", 0, 0L, "unused-key",
+                "{\"topic\":\"cmd/device-42\",\"qos\":2,\"payload\":\"hi\"}".getBytes(StandardCharsets.UTF_8));
+        InternalMessage decoded = ClusterRecords.downlinkMessage(withQos);
+        assertEquals("cmd/device-42", decoded.topic());
+        assertEquals(2, decoded.qos(), "投递 QoS 以消息体的 qos 字段为准");
+        assertEquals("hi", new String(decoded.payload(), StandardCharsets.UTF_8));
+        assertNull(decoded.clientId(), "下行消息无来源客户端, 不得排除任何订阅者");
+
+        // 消息不带 qos: 缺省 1(指令类要 PUBACK 确认)
         ConsumerRecord<String, byte[]> minimal = new ConsumerRecord<>(
                 "backend-commands", 0, 0L, "unused-key",
                 "{\"topic\":\"cmd/device-42\",\"payload\":\"hello\"}".getBytes(StandardCharsets.UTF_8));
-        InternalMessage decoded = ClusterRecords.downlinkMessage(minimal, 1);
-        assertEquals("cmd/device-42", decoded.topic());
-        assertEquals(1, decoded.qos(), "投递 QoS 一律取通道配置");
-        assertEquals("hello", new String(decoded.payload(), StandardCharsets.UTF_8));
-        assertNull(decoded.clientId(), "下行消息无来源客户端, 不得排除任何订阅者");
-
-        // 历史消息里带 qos: 仍可解析, 但不再生效(通道配置唯一)
-        ConsumerRecord<String, byte[]> legacy = new ConsumerRecord<>(
-                "backend-commands", 0, 0L, "unused-key",
-                "{\"topic\":\"cmd/device-42\",\"qos\":2,\"payload\":\"hi\"}".getBytes(StandardCharsets.UTF_8));
-        InternalMessage legacyDecoded = ClusterRecords.downlinkMessage(legacy, 1);
-        assertEquals(1, legacyDecoded.qos(), "消息里的 qos 被忽略");
-        assertEquals("hi", new String(legacyDecoded.payload(), StandardCharsets.UTF_8));
-
-        // 通道配 0 则 0
-        assertEquals(0, ClusterRecords.downlinkMessage(minimal, 0).qos());
+        assertEquals(1, ClusterRecords.downlinkMessage(minimal).qos(), "缺省 1");
 
         // 非法 JSON / 缺 topic → 丢弃
         ConsumerRecord<String, byte[]> bad = new ConsumerRecord<>(
                 "backend-commands", 0, 0L, "k", "not-json".getBytes(StandardCharsets.UTF_8));
-        assertNull(ClusterRecords.downlinkMessage(bad, 1));
+        assertNull(ClusterRecords.downlinkMessage(bad));
         ConsumerRecord<String, byte[]> noTopic = new ConsumerRecord<>(
                 "backend-commands", 0, 0L, "k", "{\"payload\":\"x\"}".getBytes(StandardCharsets.UTF_8));
-        assertNull(ClusterRecords.downlinkMessage(noTopic, 1));
+        assertNull(ClusterRecords.downlinkMessage(noTopic));
     }
 }

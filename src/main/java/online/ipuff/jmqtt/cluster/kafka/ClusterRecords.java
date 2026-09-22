@@ -210,13 +210,13 @@ public final class ClusterRecords {
     }
 
     /**
-     * 下行记录的 JSON 契约: {topic, payload}。
-     * 投递 QoS 是通道级运维策略(downlink.qos 配置), 不在消息里携带;
-     * 宽容未知字段 —— 历史消息里的 qos 字段可继续解析, 只是不再生效。
+     * 下行记录的 JSON 契约: {topic, qos?, payload}。
+     * 投递 QoS 以消息体的 qos 字段为准(缺省 1); 宽容未知字段。
      */
     @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = true)
     public record DownlinkEnvelope(
             String topic,
+            Integer qos,
             String payload
     ) {
     }
@@ -273,14 +273,13 @@ public final class ClusterRecords {
     /**
      * 解码下行记录(后台 → broker)。
      *
-     * <p>JSON 契约: {@code {topic, payload}} —— 投递 QoS 一律取通道配置
-     * ({@code channelQos}), 消息里不再携带; payload 字符串按 UTF-8 编码为
-     * MQTT 消息体。clientId 恒为 null —— 下行消息没有来源客户端,
-     * 不得因此排除任何订阅者。
+     * <p>JSON 契约: {@code {topic, qos?, payload}} —— 投递 QoS 以消息体的
+     * qos 字段为准, 缺省 1; payload 字符串按 UTF-8 编码为 MQTT 消息体。
+     * clientId 恒为 null —— 下行消息没有来源客户端, 不得因此排除任何订阅者。
      *
      * @return 内部消息; JSON 非法或 topic 缺失时返回 {@code null}, 调用方应丢弃该记录
      */
-    public static InternalMessage downlinkMessage(ConsumerRecord<String, byte[]> record, int channelQos) {
+    public static InternalMessage downlinkMessage(ConsumerRecord<String, byte[]> record) {
         if (record.value() == null) {
             return null;
         }
@@ -297,7 +296,7 @@ public final class ClusterRecords {
                 "",
                 null,
                 envelope.topic(),
-                channelQos,
+                envelope.qos() != null ? envelope.qos() : 1,
                 envelope.payload() == null ? new byte[0] : envelope.payload().getBytes(StandardCharsets.UTF_8),
                 false,
                 false,

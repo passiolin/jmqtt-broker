@@ -207,12 +207,10 @@ public record BrokerProperties(
 
         /**
          * 下行通道: broker 消费 {@code topic} 并按本地订阅投递。
-         * {@code qos} 是该通道的投递 QoS(默认 1 —— 下行都是指令类, PUBACK 确认送达;
-         * 高频可容忍丢失的通道显式配 0)。消息体不带 QoS, 通道即粒度。
+         * 投递 QoS 以消息体的 qos 字段为准(缺省 1), 通道不再配置。
          */
         public record Downlink(
-                @NotBlank String topic,
-                @DefaultValue("1") @Min(0) int qos
+                @NotBlank String topic
         ) {
         }
 
