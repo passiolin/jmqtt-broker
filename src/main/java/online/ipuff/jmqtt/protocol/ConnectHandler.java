@@ -33,6 +33,7 @@ import online.ipuff.jmqtt.message.DupPubRelMessageStore;
 import online.ipuff.jmqtt.message.DupPublishMessageStore;
 import online.ipuff.jmqtt.message.SubscribeStore;
 import online.ipuff.jmqtt.message.WillMessage;
+import online.ipuff.jmqtt.metrics.NodeMetricsService;
 import online.ipuff.jmqtt.session.BackpressureMetrics;
 import online.ipuff.jmqtt.session.ConnectionRegistry;
 import online.ipuff.jmqtt.session.ISessionStoreService;
@@ -113,6 +114,7 @@ public class ConnectHandler {
     private final InflightPersistence inflightPersistence;
     private final AdminStatePublisher adminStatePublisher;
     private final IInboundQos2Store inboundQos2Store;
+    private final NodeMetricsService nodeMetricsService;
 
     public ConnectHandler(BrokerProperties properties,
                           IAuthService authService,
@@ -127,7 +129,8 @@ public class ConnectHandler {
                           BackpressureMetrics backpressureMetrics,
                           InflightPersistence inflightPersistence,
                           AdminStatePublisher adminStatePublisher,
-                          IInboundQos2Store inboundQos2Store) {
+                          IInboundQos2Store inboundQos2Store,
+                          NodeMetricsService nodeMetricsService) {
         this.properties = properties;
         this.authService = authService;
         this.sessionStoreService = sessionStoreService;
@@ -142,6 +145,7 @@ public class ConnectHandler {
         this.inflightPersistence = inflightPersistence;
         this.adminStatePublisher = adminStatePublisher;
         this.inboundQos2Store = inboundQos2Store;
+        this.nodeMetricsService = nodeMetricsService;
     }
 
     public void processConnect(Channel channel, MqttConnectMessage msg) {
@@ -171,6 +175,7 @@ public class ConnectHandler {
                 log.debug("v5 客户端未提供 clientId, 已分配: {}", clientId);
             } else {
                 log.debug("CONNECT 被拒绝: clientId 为空");
+                nodeMetricsService.connectionRejected("clientId");
                 rejectAndClose(channel, version, ReplyFactory.ConnAckReason.CLIENT_IDENTIFIER_NOT_VALID);
                 return;
             }
@@ -243,6 +248,7 @@ public class ConnectHandler {
                               MqttVersion version, Runnable continuation) {
         if (!result.allowed()) {
             log.debug("CONNECT 被拒绝: 认证失败");
+            nodeMetricsService.connectionRejected("auth");
             rejectAndClose(channel, version, ReplyFactory.ConnAckReason.BAD_CREDENTIALS);
             return;
         }
@@ -330,6 +336,7 @@ public class ConnectHandler {
         Channel previous = connectionRegistry.register(clientId, channel);
         if (previous != null && previous != channel) {
             log.info("clientId={} 发生连接接管, 关闭旧连接 {}", clientId, previous.id().asShortText());
+            nodeMetricsService.takeoverLocal();
             previous.close();
         }
 
@@ -345,6 +352,7 @@ public class ConnectHandler {
         // 放在这里而不是更早, 是因为它要读到连接上的全部属性(版本/心跳/时间/发送缓冲)
         // 以及已恢复的订阅 —— 早于恢复订阅就会上报成「零订阅」。
         adminStatePublisher.clientOnline(clientId, channel);
+        nodeMetricsService.connectionOpened();
         // 连接事件(上线): key=clientId 有序, 只入有界队列不阻塞连接路径
         clusterBus.publishConnectionEvent(online.ipuff.jmqtt.cluster.ConnectionEvent.connected(
                 clientId,

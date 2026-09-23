@@ -25,7 +25,9 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        # prometheus: 供 Prometheus 周期抓取 /actuator/prometheus(指标由
+        # NodeMetricsService 绑定, 抓取时读值, 热路径零开销)
+        include: health,info,metrics,prometheus
   endpoint:
     health:
       show-details: always

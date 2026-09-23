@@ -54,6 +54,16 @@
         </dependency>
 
         <!--
+            Prometheus 抓取端点: /actuator/prometheus 文本格式。
+            指标由 NodeMetricsService 以 FunctionCounter/Gauge 绑定 ——
+            抓取时才读值, 消息热路径上没有 Micrometer 开销。
+        -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+
+        <!--
             Netty: 版本由 Spring Boot 的 netty-bom 统一管理, 无需显式声明版本。
             netty-codec-mqtt 是官方 MQTT 编解码库, 支持 v3.1 / v3.1.1 / v5.0。
         -->

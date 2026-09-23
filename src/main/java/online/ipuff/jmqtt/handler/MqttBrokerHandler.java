@@ -84,6 +84,7 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
     private final AdminStatePublisher adminStatePublisher;
     private final online.ipuff.jmqtt.authz.IAclService aclService;
     private final online.ipuff.jmqtt.cluster.ClusterBus clusterBus;
+    private final online.ipuff.jmqtt.metrics.NodeMetricsService nodeMetricsService;
 
     public MqttBrokerHandler(ProtocolProcessor protocolProcessor,
                              ConnectionRegistry connectionRegistry,
@@ -93,7 +94,8 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
                              IRetainMessageStoreService retainMessageStoreService,
                              AdminStatePublisher adminStatePublisher,
                              online.ipuff.jmqtt.authz.IAclService aclService,
-                             online.ipuff.jmqtt.cluster.ClusterBus clusterBus) {
+                             online.ipuff.jmqtt.cluster.ClusterBus clusterBus,
+                             online.ipuff.jmqtt.metrics.NodeMetricsService nodeMetricsService) {
         this.protocolProcessor = protocolProcessor;
         this.connectionRegistry = connectionRegistry;
         this.sessionStoreService = sessionStoreService;
@@ -103,6 +105,7 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
         this.adminStatePublisher = adminStatePublisher;
         this.aclService = aclService;
         this.clusterBus = clusterBus;
+        this.nodeMetricsService = nodeMetricsService;
     }
 
     @Override
@@ -248,6 +251,10 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
             // 刚接管它的新连接从视图里删掉 —— 客户端明明在线, 控制台上却消失了。
             if (removed) {
                 adminStatePublisher.clientOffline(clientId);
+                // 断连计数: 优雅(DISCONNECT 主动断开)与异常(超时/TCP 断开)分开 ——
+                // 异常断连速率是弱网/设备故障的直接信号
+                nodeMetricsService.connectionClosed(Boolean.TRUE.equals(
+                        channel.attr(ChannelAttributes.GRACEFUL_DISCONNECT).get()));
                 // 连接事件(下线): 只在「该 clientId 的在线状态真正结束」时发布 ——
                 // 被接管时旧连接的关闭不构成下线(客户端马上以新连接出现在事件流里)
                 clusterBus.publishConnectionEvent(

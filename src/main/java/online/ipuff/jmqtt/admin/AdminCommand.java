@@ -92,6 +92,12 @@ public record AdminCommand(
     public static final String TYPE_CLIENT_DETAIL = "CLIENT_DETAIL";
 
     /**
+     * 查询本节点的运行时指标(当前累计值)。
+     * broker 只维护最高效的当前状态, 历史序列由控制台定时采集并存 Redis。
+     */
+    public static final String TYPE_METRICS = "METRICS";
+
+    /**
      * 是否已过期。
      *
      * <p>{@code maxAgeMs <= 0} 视为不设限 —— 便于在受控环境里手工调试。

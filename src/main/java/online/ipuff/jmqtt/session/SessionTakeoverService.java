@@ -58,6 +58,7 @@ public class SessionTakeoverService implements TakeoverListener {
     private final IDupPubRelMessageStoreService dupPubRelMessageStoreService;
     private final IPendingMessageStore pendingMessageStore;
     private final IInboundQos2Store inboundQos2Store;
+    private final online.ipuff.jmqtt.metrics.NodeMetricsService nodeMetricsService;
 
     public SessionTakeoverService(ConnectionRegistry connectionRegistry,
                                   ISessionStoreService sessionStoreService,
@@ -65,7 +66,8 @@ public class SessionTakeoverService implements TakeoverListener {
                                   IInboundQos2Store inboundQos2Store,
                                   IDupPublishMessageStoreService dupPublishMessageStoreService,
                                   IDupPubRelMessageStoreService dupPubRelMessageStoreService,
-                                  IPendingMessageStore pendingMessageStore) {
+                                  IPendingMessageStore pendingMessageStore,
+                                  online.ipuff.jmqtt.metrics.NodeMetricsService nodeMetricsService) {
         this.connectionRegistry = connectionRegistry;
         this.sessionStoreService = sessionStoreService;
         this.subscribeStoreService = subscribeStoreService;
@@ -73,6 +75,7 @@ public class SessionTakeoverService implements TakeoverListener {
         this.dupPublishMessageStoreService = dupPublishMessageStoreService;
         this.dupPubRelMessageStoreService = dupPubRelMessageStoreService;
         this.pendingMessageStore = pendingMessageStore;
+        this.nodeMetricsService = nodeMetricsService;
     }
 
     @Override
@@ -84,6 +87,7 @@ public class SessionTakeoverService implements TakeoverListener {
                     clientId, fromNodeId);
             return;
         }
+        nodeMetricsService.takeoverRemote();
 
         int inflight = dupPublishMessageStoreService.get(clientId).size()
                 + dupPubRelMessageStoreService.get(clientId).size();

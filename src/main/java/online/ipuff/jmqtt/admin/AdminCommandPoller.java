@@ -59,6 +59,7 @@ public class AdminCommandPoller {
     private final AdminStatePublisher publisher;
     private final EvictionService evictionService;
     private final TopicCaptureService captureService;
+    private final online.ipuff.jmqtt.metrics.NodeMetricsService nodeMetricsService;
 
     /** 只要为了「本节点当前连着多少客户端」填入命令结果 */
     private final ConnectionRegistry connectionRegistry;
@@ -77,7 +78,8 @@ public class AdminCommandPoller {
                               AdminStatePublisher publisher,
                               EvictionService evictionService,
                               ConnectionRegistry connectionRegistry,
-                             TopicCaptureService captureService) {
+                             TopicCaptureService captureService,
+                             online.ipuff.jmqtt.metrics.NodeMetricsService nodeMetricsService) {
         this.properties = properties;
         this.nodeId = brokerProperties.id();
         this.keys = keys;
@@ -87,6 +89,7 @@ public class AdminCommandPoller {
         this.evictionService = evictionService;
         this.captureService = captureService;
         this.connectionRegistry = connectionRegistry;
+        this.nodeMetricsService = nodeMetricsService;
     }
 
     @Scheduled(fixedDelayString = "${jmqtt.broker.admin.command-poll-interval-ms:500}")
@@ -190,6 +193,12 @@ public class AdminCommandPoller {
                         fields.put("snapshot", snapshot);
                         reporter.write(command.id(), fields);
                     }
+                }
+                case AdminCommand.TYPE_METRICS -> {
+                    // 指标全部在内存里现成, 这里只做一次读取与序列化
+                    Map<String, String> fields = result(command, EvictionState.COMPLETED, "ok");
+                    fields.put("snapshot", nodeMetricsService.snapshotJson());
+                    reporter.write(command.id(), fields);
                 }
                 case AdminCommand.TYPE_EVICT_ABORT -> {
                     boolean aborted = evictionService.abort(command.evictTaskId());
