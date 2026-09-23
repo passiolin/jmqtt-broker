@@ -129,6 +129,13 @@ public class AdminStatePublisher {
     private final AtomicLong lastReconciledDropCount = new AtomicLong();
     private final AtomicBoolean reconcileRequested = new AtomicBoolean(true);
 
+    /**
+     * 上次发布进客户端条目的 filters 签名(clientId → 规范化串), 供周期闸门比对。
+     * 只在内存: 订阅变化后需要知道「谁变了」, 记住上次发过什么即可。
+     */
+    private final java.util.concurrent.ConcurrentHashMap<String, String> lastPublishedFilters =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
     private volatile long lastSubscribeVersion = -1L;
     private volatile long lastHeartbeatAt;
     private volatile long lastFilterPublishAt;
@@ -176,6 +183,26 @@ public class AdminStatePublisher {
     // ------------------------------------------------------------------
 
     /**
+     * 某客户端<b>当下</b>的完整状态快照(含订阅列表), 供管理命令按需查询。
+     *
+     * <p>订阅不随变化实时上报 —— 重连风暴下的写放大不配「人工点开详情」这个低频动作;
+     * 控制台需要时通过命令通道下发查询, 这里现场构建。{@code active()} 为 false 时
+     * 照常构建: 它只读本地状态, 不触碰 Redis。
+     *
+     * @return 快照 JSON; 客户端不在线(或状态残缺)返回 {@code null}
+     */
+    public String clientSnapshotJson(String clientId) {
+        if (clientId == null) {
+            return null;
+        }
+        Channel channel = connectionRegistry.get(clientId);
+        if (channel == null) {
+            return null;
+        }
+        return buildClientJson(clientId, channel);
+    }
+
+    /**
      * 客户端已接入。由 CONNECT 处理路径调用。
      *
      * <p>这个方法<b>必须保持非阻塞且不抛异常</b>: 它在每条连接的建立路径上。
@@ -201,6 +228,7 @@ public class AdminStatePublisher {
      * 表现为控制台里客户端凭空消失, 而它其实好好地在线。
      */
     public void clientOffline(String clientId) {
+        lastPublishedFilters.remove(clientId);
         if (!active() || clientId == null) {
             return;
         }
@@ -390,7 +418,56 @@ public class AdminStatePublisher {
         if (Boolean.TRUE.equals(ok)) {
             lastSubscribeVersion = version;
             lastFilterPublishAt = now;
+            refreshChangedClients();
         }
+    }
+
+    /**
+     * 把<b>订阅确实发生了变化</b>的在线客户端条目重新入队。
+     *
+     * <p>客户端条目里的 {@code filters} 是连接时刻的快照, 而订阅发生在 CONNECT 之后 ——
+     * 不补这一步, 控制台「点过滤器找订阅者」永远找不到人(扫的就是这个字段)。
+     *
+     * <p>挂在过滤器视图的变更闸门之后({@code mutationVersion} 没变直接返回):
+     * <b>不是</b>每次 SUBSCRIBE 都写(重连风暴下的写放大不配低频查看),
+     * 而是随周期重算(默认 5s)比对一次内存, 只有 filters 真变了的客户端才重发一条。
+     * 空闲时成本是一次内存遍历, 零入队。
+     */
+    private void refreshChangedClients() {
+        for (String clientId : connectionRegistry.clientIds()) {
+            String current = filtersSignature(clientId);
+            String published = lastPublishedFilters.get(clientId);
+            if (published != null && published.equals(current)) {
+                continue;
+            }
+            Channel channel = connectionRegistry.get(clientId);
+            if (channel == null) {
+                lastPublishedFilters.remove(clientId);
+                continue;
+            }
+            try {
+                enqueue(new ClientOp(clientId, buildClientJson(clientId, channel)));
+                if (current != null) {
+                    lastPublishedFilters.put(clientId, current);
+                } else {
+                    lastPublishedFilters.remove(clientId);
+                }
+            } catch (Exception e) {
+                countDrop();
+            }
+        }
+    }
+
+    /** 客户端当前订阅的规范化串(排序后拼接), 作为「有没有变」的比对签名 */
+    private String filtersSignature(String clientId) {
+        java.util.Collection<SubscribeStore> subscriptions = subscribeStoreService.subscriptionsOf(clientId);
+        if (subscriptions.isEmpty()) {
+            return null;
+        }
+        return subscriptions.stream()
+                .map(SubscribeStore::topicFilter)
+                .sorted()
+                .collect(java.util.stream.Collectors.joining("\u0001"));
     }
 
     // ------------------------------------------------------------------

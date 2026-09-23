@@ -20,6 +20,7 @@ import io.netty.channel.Channel;
 import io.netty.handler.codec.mqtt.MqttProperties;
 import io.netty.handler.codec.mqtt.MqttPublishMessage;
 import io.netty.handler.codec.mqtt.MqttQoS;
+import online.ipuff.jmqtt.admin.TopicCaptureService;
 import online.ipuff.jmqtt.authz.AclGate;
 import online.ipuff.jmqtt.authz.IAclService;
 import online.ipuff.jmqtt.cluster.InternalCommunication;
@@ -69,19 +70,22 @@ public class PublishHandler {
     private final QosMetrics qosMetrics;
     private final IInboundQos2Store inboundQos2Store;
     private final IAclService aclService;
+    private final TopicCaptureService captureService;
 
     public PublishHandler(InternalCommunication internalCommunication,
                           InternalSendServer internalSendServer,
                           IRetainMessageStoreService retainMessageStoreService,
                           QosMetrics qosMetrics,
                           IInboundQos2Store inboundQos2Store,
-                          IAclService aclService) {
+                          IAclService aclService,
+                          TopicCaptureService captureService) {
         this.internalCommunication = internalCommunication;
         this.internalSendServer = internalSendServer;
         this.retainMessageStoreService = retainMessageStoreService;
         this.qosMetrics = qosMetrics;
         this.inboundQos2Store = inboundQos2Store;
         this.aclService = aclService;
+        this.captureService = captureService;
     }
 
     /**
@@ -222,6 +226,9 @@ public class PublishHandler {
         InternalMessage internalMessage =
                 internalCommunication.fromLocal(clientId, topic, qos, payload, false, false,
                 channel.attr(ChannelAttributes.USERNAME).get());
+
+        // 消息抓取(排障用): 零活跃任务时一次空表判断即返回; 命中只入有界队列, 不做 Redis 写
+        captureService.onPublish(internalMessage);
 
         int delivered = internalSendServer.sendPublishMessage(internalMessage);
 

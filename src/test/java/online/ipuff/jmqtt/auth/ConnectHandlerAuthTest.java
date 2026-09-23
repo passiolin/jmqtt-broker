@@ -103,7 +103,10 @@ class ConnectHandlerAuthTest {
         InternalSendServer internalSendServer = new InternalSendServer(
                 subscribeStoreService, connectionRegistry, new MessageIdService(),
                 dupPublishStore, sessionStoreService, new InMemoryPendingMessageStore(),
-                props, backpressureMetrics, new QosMetrics());
+                props, backpressureMetrics, new QosMetrics(),
+                new online.ipuff.jmqtt.admin.TopicCaptureService(
+                        online.ipuff.jmqtt.TestObjectProviders.empty(),
+                        new online.ipuff.jmqtt.admin.AdminRedisKeys(props), props));
 
         handler = new ConnectHandler(props,
                 (clientId, username, password, peerhost) -> authGate,

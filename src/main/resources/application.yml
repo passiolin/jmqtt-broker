@@ -249,8 +249,11 @@ jmqtt:
       # JMQTT_REDIS_NODES=10.0.0.6:26379,10.0.0.7:26379
       nodes: []
       key-prefix: jmqtt
-      # 连接建立路径上的命令超时, 必须设小
-      command-timeout-ms: 1000
+      # 连接建立路径上的命令超时。要小但不能太小:
+      # 正常命令 1~2ms 就回来, 这个值实际约束的是「异常时等多久才降级」——
+      # 1s 会被偶发的网络毛刺(TCP 重传 200ms~1s)和 GC 停顿打穿, 产生假故障告警;
+      # 2s 能吸收这两类毛刺, 真故障时代价不变(冷却机制短路后续命令)
+      command-timeout-ms: ${JMQTT_REDIS_COMMAND_TIMEOUT_MS:2000}
       # 健康检查间隔: 决定 Redis 故障与恢复被感知的时延
       health-interval-ms: 5000
 

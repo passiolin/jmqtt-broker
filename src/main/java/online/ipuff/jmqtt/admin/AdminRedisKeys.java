@@ -27,6 +27,9 @@ import org.springframework.stereotype.Component;
  * {prefix}:admin:filters:{nodeId}  HASH   topicFilter -> 订阅者数
  * {prefix}:admin:cmd:{nodeId}      LIST   控制台下发的命令(控制台 LPUSH, 节点 RPOP)
  * {prefix}:admin:cmdr:{cmdId}      HASH   命令结果与进度, TTL = commandResultTtl
+ * {prefix}:admin:captures          SET    全部消息抓取任务 id
+ * {prefix}:admin:capture:{id}      HASH   抓取任务元数据与状态, TTL 3 天
+ * {prefix}:admin:capture:{id}:msgs LIST   抓取到的消息(新的在左), TTL 3 天
  * </pre>
  *
  * <h2>三个关键设计点</h2>
@@ -74,6 +77,21 @@ public class AdminRedisKeys {
     /** 该节点的命令队列 */
     public String commandQueue(String nodeId) {
         return prefix + ":admin:cmd:" + nodeId;
+    }
+
+    /** 全部抓取任务 id(注册表; 成员由 TTL 自然回收, 控制台可显式删) */
+    public String captures() {
+        return prefix + ":admin:captures";
+    }
+
+    /** 抓取任务元数据 */
+    public String capture(String captureId) {
+        return prefix + ":admin:capture:" + captureId;
+    }
+
+    /** 抓取到的消息列表(新的在左, LTRIM 到任务上限) */
+    public String captureMessages(String captureId) {
+        return prefix + ":admin:capture:" + captureId + ":msgs";
     }
 
     /** 命令结果与进度 */

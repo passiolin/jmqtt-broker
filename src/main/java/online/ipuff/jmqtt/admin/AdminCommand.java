@@ -41,8 +41,27 @@ public record AdminCommand(
         long maxAgeMs,
         String clientId,
         String evictTaskId,
-        EvictionSpec spec
+        EvictionSpec spec,
+        CaptureSpec capture,
+        String captureId
 ) {
+
+    /**
+     * 消息监听任务参数({@link #TYPE_CAPTURE_START})。
+     *
+     * @param id              任务 id(由控制台生成, 即 Redis 键名的一部分)
+     * @param filter          主题过滤器(MQTT 通配符)
+     * @param durationMinutes 时长(分钟, 上限见 TopicCaptureService)
+     * @param maxMessages     条数上限
+     */
+    public record CaptureSpec(
+            String id,
+            String filter,
+            Integer durationMinutes,
+            Integer maxMessages,
+            String clientId
+    ) {
+    }
 
     /** 探活: 顺便让节点把最新概要写回 Redis */
     public static final String TYPE_PING = "PING";
@@ -58,6 +77,19 @@ public record AdminCommand(
 
     /** 立即重建全量状态视图(客户端注册表 + 过滤器视图) */
     public static final String TYPE_SNAPSHOT = "SNAPSHOT";
+
+    /** 开始一个消息监听任务(参数见 {@link CaptureSpec}) */
+    public static final String TYPE_CAPTURE_START = "CAPTURE_START";
+
+    /** 停止一个消息监听任务(数据保留给控制台删除/TTL) */
+    public static final String TYPE_CAPTURE_STOP = "CAPTURE_STOP";
+
+    /**
+     * 查询某客户端<b>当下</b>的完整状态快照(含订阅列表)。
+     * 控制台在人工点开客户端详情时按需下发 —— 订阅不随变化实时上报
+     * (写放大不配这个低频动作), 快照在查询时刻现场构建。
+     */
+    public static final String TYPE_CLIENT_DETAIL = "CLIENT_DETAIL";
 
     /**
      * 是否已过期。

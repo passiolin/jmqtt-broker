@@ -96,7 +96,6 @@ class SubscribeHandlerAclTest {
                 new DupPublishMessageStoreService(),
                 new SessionPersistence(new NoopSessionRepository(), sessionStoreService), acl);
     }
-
     private EmbeddedChannel clientChannel(boolean v5) {
         EmbeddedChannel channel = new EmbeddedChannel();
         channel.attr(ChannelAttributes.CLIENT_ID).set("client-1");

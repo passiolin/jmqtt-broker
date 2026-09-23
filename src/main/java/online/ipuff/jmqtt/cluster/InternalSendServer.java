@@ -66,6 +66,7 @@ public class InternalSendServer {
     private final ISessionStoreService sessionStoreService;
     private final IPendingMessageStore pendingMessageStore;
     private final BrokerProperties properties;
+    private final online.ipuff.jmqtt.admin.TopicCaptureService captureService;
     private final BackpressureMetrics metrics;
     private final QosMetrics qosMetrics;
 
@@ -77,7 +78,8 @@ public class InternalSendServer {
                              IPendingMessageStore pendingMessageStore,
                              BrokerProperties properties,
                              BackpressureMetrics metrics,
-                             QosMetrics qosMetrics) {
+                             QosMetrics qosMetrics,
+                             online.ipuff.jmqtt.admin.TopicCaptureService captureService) {
         this.subscribeStoreService = subscribeStoreService;
         this.connectionRegistry = connectionRegistry;
         this.messageIdService = messageIdService;
@@ -85,6 +87,7 @@ public class InternalSendServer {
         this.sessionStoreService = sessionStoreService;
         this.pendingMessageStore = pendingMessageStore;
         this.properties = properties;
+        this.captureService = captureService;
         this.metrics = metrics;
         this.qosMetrics = qosMetrics;
     }
@@ -95,7 +98,7 @@ public class InternalSendServer {
      * <p>订阅者不在线时: 若其会话是持久的({@code cleanSession=0})且 QoS &gt; 0,
      * 消息进入离线队列, 客户端重连后投递; 否则丢弃(MQTT 语义如此)。
      *
-     * @param message 内部消息; {@code clientId} 用于排除发布者自身, 可为 null(总线注入时)
+     * @param message 内部消息; {@code clientId} 只作来源标识, 不参与投递判定
      * @return 实际投递的客户端数(不含入队数)
      */
     public int sendPublishMessage(InternalMessage message) {
@@ -111,10 +114,10 @@ public class InternalSendServer {
         for (SubscribeStore sub : subscribers) {
             String subscriberId = sub.clientId();
 
-            // 不回发给发布者自身(规范: No Local 语义, MQTT 3.1.1 下即「不投给自己」)
-            if (message.clientId() != null && message.clientId().equals(subscriberId)) {
-                continue;
-            }
+            // 不排除发布者自身: loopback(自发自收)是 MQTT 的合法且必须投递的语义。
+            // "No Local" 是 v5 的订阅选项且默认关闭 —— 此前按 clientId 全局排除发布者,
+            // 导致订阅了自己发布主题的客户端永远收不到消息(违背规范)。
+            // 集群下也不会双投: 本节点投完后, 总线回环由消费端的 brokerId 自查拦住。
 
             // 投递 QoS 取发布 QoS 与订阅 QoS 的较小值
             int deliveryQos = Math.min(message.qos(), sub.qos());
@@ -124,6 +127,10 @@ public class InternalSendServer {
                 enqueueOffline(subscriberId, topic, deliveryQos, payload, message.retain());
                 continue;
             }
+
+            // 消息抓取(客户端维度, direction=sub): 记录该订阅者收到了什么。
+            // 零活跃任务时一次空表判断即返回
+            captureService.onDeliver(message, subscriberId);
 
             deliver(channel, subscriberId, topic, payload, deliveryQos, message.retain(), message.dup());
             delivered++;

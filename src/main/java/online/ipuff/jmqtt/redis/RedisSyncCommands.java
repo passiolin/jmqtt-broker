@@ -54,6 +54,10 @@ public interface RedisSyncCommands {
 
     Long llen(String key);
 
+    Long lpush(String key, String... values);
+
+    String ltrim(String key, long start, long stop);
+
     String rpop(String key);
 
     <T> T eval(String script, ScriptOutputType type, String[] keys, String... values);

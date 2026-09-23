@@ -120,6 +120,16 @@ public final class RedisConnectionSource implements AutoCloseable {
         }
 
         @Override
+        public Long lpush(String key, String... values) {
+            return c.lpush(key, values);
+        }
+
+        @Override
+        public String ltrim(String key, long start, long stop) {
+            return c.ltrim(key, start, stop);
+        }
+
+        @Override
         public String rpop(String key) {
             return c.rpop(key);
         }
@@ -181,6 +191,16 @@ public final class RedisConnectionSource implements AutoCloseable {
         @Override
         public Long llen(String key) {
             return c.llen(key);
+        }
+
+        @Override
+        public Long lpush(String key, String... values) {
+            return c.lpush(key, values);
+        }
+
+        @Override
+        public String ltrim(String key, long start, long stop) {
+            return c.ltrim(key, start, stop);
         }
 
         @Override

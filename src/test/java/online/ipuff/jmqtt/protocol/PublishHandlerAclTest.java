@@ -45,6 +45,7 @@ import online.ipuff.jmqtt.subscribe.SubscribeStoreService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.ObjectProvider;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
@@ -112,13 +113,19 @@ class PublishHandlerAclTest {
         InternalSendServer sendServer = new InternalSendServer(
                 subscribeStoreService, registry, new MessageIdService(),
                 new DupPublishMessageStoreService(), sessionStoreService,
-                new InMemoryPendingMessageStore(), props, metrics, new QosMetrics());
+                new InMemoryPendingMessageStore(), props, metrics, new QosMetrics(),
+                new online.ipuff.jmqtt.admin.TopicCaptureService(
+                        online.ipuff.jmqtt.TestObjectProviders.empty(),
+                        new online.ipuff.jmqtt.admin.AdminRedisKeys(props), props));
         InternalCommunication communication = new InternalCommunication(
                 new online.ipuff.jmqtt.cluster.LocalClusterBus(props), props);
         acl = new StubAcl();
         handler = new PublishHandler(communication, sendServer,
                 new RetainMessageStoreService(), new QosMetrics(),
-                new InboundQos2Store(props), acl);
+                new InboundQos2Store(props), acl,
+                new online.ipuff.jmqtt.admin.TopicCaptureService(
+                        emptyProvider(),
+                        new online.ipuff.jmqtt.admin.AdminRedisKeys(props), props));
     }
 
     private EmbeddedChannel publisherChannel(boolean v5) {
@@ -246,5 +253,29 @@ class PublishHandlerAclTest {
 
     private static String payloadOf(Object message) {
         return new String(((MqttPublishMessage) message).payload().array(), StandardCharsets.UTF_8);
+    }
+
+    private static <T> ObjectProvider<T> emptyProvider() {
+        return new ObjectProvider<>() {
+            @Override
+            public T getObject() {
+                throw new java.util.NoSuchElementException();
+            }
+
+            @Override
+            public T getObject(Object... args) {
+                throw new java.util.NoSuchElementException();
+            }
+
+            @Override
+            public T getIfAvailable() {
+                return null;
+            }
+
+            @Override
+            public T getIfUnique() {
+                return null;
+            }
+        };
     }
 }

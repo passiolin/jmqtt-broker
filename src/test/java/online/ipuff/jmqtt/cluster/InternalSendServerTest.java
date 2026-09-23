@@ -85,6 +85,26 @@ class InternalSendServerTest {
     // ------------------------------------------------------------------
 
     @Test
+    @DisplayName("loopback: 发布者订阅了主题时必须收到自己的消息(No Local 是 v5 订阅选项且默认关闭)")
+    void publisherSubscribedReceivesOwnMessage() {
+        // 发布者自己订阅该主题(不是另一个客户端)
+        subscribeStoreService.put(new SubscribeStore(PUBLISHER, "sensor/+/temp", 1));
+        // 同一 clientId 既发布又订阅 —— MQTT 语义必须投递(loopback)
+        EmbeddedChannel publisherChannel = new EmbeddedChannel();
+        publisherChannel.attr(ChannelAttributes.CLIENT_ID).set(PUBLISHER);
+        publisherChannel.attr(ChannelAttributes.SEND_BUFFER)
+                .set(new SendBuffer(32, 1000, metrics));
+        connectionRegistry.register(PUBLISHER, publisherChannel);
+
+        InternalMessage loopback = new InternalMessage("node-1", PUBLISHER, TOPIC, 0,
+                "self".getBytes(StandardCharsets.UTF_8), false, false, null);
+        int delivered = server.sendPublishMessage(loopback);
+
+        assertEquals(1, delivered, "发布者自身的订阅必须命中(loopback 是 MQTT 语义)");
+        assertNotNull(publisherChannel.readOutbound(), "发布者必须真的收到自己的消息");
+    }
+
+    @Test
     @DisplayName("订阅者在线时直接投递, 不入队")
     void onlineSubscriberIsDeliveredDirectly() {
         subscribe("sensor/+/temp", 1);
@@ -312,7 +332,10 @@ class InternalSendServerTest {
 
     private InternalSendServer buildServer(BrokerProperties props) {
         return new InternalSendServer(subscribeStoreService, connectionRegistry, new MessageIdService(),
-                dupStore, sessionStoreService, pendingStore, props, metrics, new QosMetrics());
+                dupStore, sessionStoreService, pendingStore, props, metrics, new QosMetrics(),
+                new online.ipuff.jmqtt.admin.TopicCaptureService(
+                        online.ipuff.jmqtt.TestObjectProviders.empty(),
+                        new online.ipuff.jmqtt.admin.AdminRedisKeys(props), props));
     }
 
     private static BrokerProperties propertiesWithOfflineQueueLen(int offlineQueueLen) {

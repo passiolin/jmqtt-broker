@@ -74,3 +74,6 @@ logs/
 
 # 本地/部署环境定制(被 application.yml 的 spring.config.import 可选加载)
 application-local.yml
+
+# 嵌套的独立项目(有自己的 git 仓库), 不得进入本仓库
+jmqtt-admin/

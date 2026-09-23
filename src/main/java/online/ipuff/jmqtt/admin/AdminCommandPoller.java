@@ -58,6 +58,7 @@ public class AdminCommandPoller {
     private final AdminCommandReporter reporter;
     private final AdminStatePublisher publisher;
     private final EvictionService evictionService;
+    private final TopicCaptureService captureService;
 
     /** 只要为了「本节点当前连着多少客户端」填入命令结果 */
     private final ConnectionRegistry connectionRegistry;
@@ -75,7 +76,8 @@ public class AdminCommandPoller {
                               AdminCommandReporter reporter,
                               AdminStatePublisher publisher,
                               EvictionService evictionService,
-                              ConnectionRegistry connectionRegistry) {
+                              ConnectionRegistry connectionRegistry,
+                             TopicCaptureService captureService) {
         this.properties = properties;
         this.nodeId = brokerProperties.id();
         this.keys = keys;
@@ -83,6 +85,7 @@ public class AdminCommandPoller {
         this.reporter = reporter;
         this.publisher = publisher;
         this.evictionService = evictionService;
+        this.captureService = captureService;
         this.connectionRegistry = connectionRegistry;
     }
 
@@ -157,6 +160,35 @@ public class AdminCommandPoller {
                     if (task.state() == EvictionState.RECEIVED) {
                         log.info("驱逐命令已受理: id={} 计划={} 每批={} 间隔={}ms",
                                 command.id(), task.target(), task.batchSize(), task.intervalMs());
+                    }
+                }
+                case AdminCommand.TYPE_CAPTURE_START -> {
+                    AdminCommand.CaptureSpec spec = command.capture();
+                    if (spec == null) {
+                        reporter.write(command.id(), result(command, EvictionState.REJECTED,
+                                "缺少抓取参数"));
+                    } else {
+                        String error = captureService.start(spec.id(), spec.filter(), spec.clientId(),
+                                spec.durationMinutes() == null ? 10 : spec.durationMinutes(),
+                                spec.maxMessages() == null ? 1000 : spec.maxMessages());
+                        reporter.write(command.id(), error == null
+                                ? result(command, EvictionState.COMPLETED, "抓取已开始")
+                                : result(command, EvictionState.REJECTED, error));
+                    }
+                }
+                case AdminCommand.TYPE_CAPTURE_STOP -> {
+                    captureService.stop(command.captureId());
+                    reporter.write(command.id(), result(command, EvictionState.COMPLETED, "抓取已停止"));
+                }
+                case AdminCommand.TYPE_CLIENT_DETAIL -> {
+                    String snapshot = publisher.clientSnapshotJson(command.clientId());
+                    if (snapshot == null) {
+                        reporter.write(command.id(), result(command, EvictionState.REJECTED,
+                                "该客户端不在本节点(可能已断开或已迁移)"));
+                    } else {
+                        Map<String, String> fields = result(command, EvictionState.COMPLETED, "ok");
+                        fields.put("snapshot", snapshot);
+                        reporter.write(command.id(), fields);
                     }
                 }
                 case AdminCommand.TYPE_EVICT_ABORT -> {
