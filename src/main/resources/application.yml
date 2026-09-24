@@ -49,8 +49,9 @@ jmqtt:
     websocket-path: /mqtt
 
     # Netty 线程
-    # boss 线程数, 默认为 1 即可
-    boss-threads: 1
+    # boss 线程数, 缺省 0 = 与 CPU 核数相同
+    # (单端口监听下实际只有 1 个 loop 承接 accept, 多出的线程为多端口/高频接入留余量)
+    boss-threads: 0
     # worker 线程数, 0 表示 2 * CPU 核数
     worker-threads: 0
     # 是否使用 Linux epoll 传输, 无 native 库时自动降级为 NIO
@@ -150,11 +151,13 @@ jmqtt:
       # 单次 poll 的最长等待
       poll-timeout-ms: 200
 
-      # 集群消费并行度(worker 数), 默认 1 = 串行消费。
+      # 集群消费并行度(worker 数), 缺省 0 = 2 × CPU 核数。
       # 记录按分区哈希到固定 worker; 广播 key 恒为 MQTT 主题(同主题必落同分区),
       # 因此并行只发生在不同分区之间, 同主题仍然严格有序。
+      # 同时是下行通道(downlink)worker 池的大小 —— 下行 key 为设备标识,
+      # 同设备同分区同 worker, 设备内投递严格有序。
       # 有效上限 = topic 分区数
-      consumer-threads: 1
+      consumer-threads: 0
 
       # ---- 数据面: 上行出口 ----
       # 单路由形态(兼容保留)。配置了下方的 routes 时, 这三项被 routes 取代

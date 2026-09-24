@@ -93,8 +93,8 @@ public class BrokerServer implements SmartLifecycle {
             }
 
             this.bossGroup = useEpoll
-                    ? new EpollEventLoopGroup(properties.bossThreads())
-                    : new NioEventLoopGroup(properties.bossThreads());
+                    ? new EpollEventLoopGroup(properties.bossThreadsOrDefault())
+                    : new NioEventLoopGroup(properties.bossThreadsOrDefault());
             this.workerGroup = useEpoll
                     ? new EpollEventLoopGroup(properties.workerThreadsOrDefault())
                     : new NioEventLoopGroup(properties.workerThreadsOrDefault());
@@ -102,12 +102,14 @@ public class BrokerServer implements SmartLifecycle {
             startMqttServer();
             if (properties.websocketEnabled()) {
                 startWebSocketServer();
-                log.info("MQTT Broker [{}] 已启动. 端口: {} WebSocket 端口: {} (transport={})",
+                log.info("MQTT Broker [{}] 已启动. 端口: {} WebSocket 端口: {} (transport={}, boss={}, worker={})",
                         properties.id(), properties.port(), properties.websocketPort(),
-                        useEpoll ? "epoll" : "nio");
+                        useEpoll ? "epoll" : "nio",
+                        properties.bossThreadsOrDefault(), properties.workerThreadsOrDefault());
             } else {
-                log.info("MQTT Broker [{}] 已启动. 端口: {} (transport={})",
-                        properties.id(), properties.port(), useEpoll ? "epoll" : "nio");
+                log.info("MQTT Broker [{}] 已启动. 端口: {} (transport={}, boss={}, worker={})",
+                        properties.id(), properties.port(), useEpoll ? "epoll" : "nio",
+                        properties.bossThreadsOrDefault(), properties.workerThreadsOrDefault());
             }
         } catch (Exception e) {
             running.set(false);

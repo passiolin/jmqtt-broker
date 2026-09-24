@@ -47,7 +47,7 @@ public record BrokerProperties(
         @Min(1) int websocketPort,
         @NotBlank String websocketPath,
 
-        @Min(1) int bossThreads,
+        @DefaultValue("0") @Min(0) int bossThreads,
         @Min(0) int workerThreads,
         boolean useEpoll,
 
@@ -96,6 +96,15 @@ public record BrokerProperties(
         @Min(0) int writeBufferLowWaterMark,
         @Min(0) int writeBufferHighWaterMark
 ) {
+
+    /**
+     * boss 线程数, 0 表示与 CPU 核数相同。
+     * 注意: 单端口监听下实际只有 1 个 loop 承接 accept, 多出的线程平时空闲 ——
+     * 多端口(TCP+WebSocket)或高频接入场景下按核数提供余量。
+     */
+    public int bossThreadsOrDefault() {
+        return bossThreads > 0 ? bossThreads : Runtime.getRuntime().availableProcessors();
+    }
 
     /**
      * worker 线程数, 0 表示 2 * CPU 核数。
@@ -151,8 +160,11 @@ public record BrokerProperties(
      * @param consumerThreads  集群消费并行度(worker 数)。记录按<b>分区</b>哈希到固定
      *                         worker —— 由于广播 record 的 key 恒为 MQTT 主题(同主题必落
      *                         同分区), 同主题的消息仍严格有序, 并行只发生在不同分区之间。
-     *                         默认 1(即串行消费, 与历史行为一致); 消费跟不上时调大,
-     *                         有效上限是 topic 的分区数
+     *                         缺省 0(= 2 × CPU 核数); 消费跟不上时调大,
+     *                         有效上限是 topic 的分区数。
+     *                         <b>同时是下行通道(downlink)worker 池的大小</b> ——
+     *                         容量压测证明单线程下行在逐条回显的对称流量下 ≈5.5k msg/s 封顶,
+     *                         下行已改为与消息面同构的按分区并行消费
      * @param compressionType  压缩算法, 如 lz4 / snappy / zstd / none
      * @param autoOffsetReset  无已提交 offset 时的起点, latest 或 earliest
      * @param connectionEventTopic 连接事件(上线/下线)发布的专用 topic。
@@ -181,7 +193,7 @@ public record BrokerProperties(
             @Min(0) int maxBlockMs,
             @Min(1) int queueCapacity,
             @Min(1) int pollTimeoutMs,
-            @DefaultValue("1") @Min(1) int consumerThreads,
+            @DefaultValue("0") @Min(0) int consumerThreads,
             String compressionType,
             String autoOffsetReset,
             String uplinkKey,
@@ -230,6 +242,15 @@ public record BrokerProperties(
 
         public boolean uplinkEnabled() {
             return uplinkTopic != null && !uplinkTopic.isBlank();
+        }
+
+        /**
+         * 集群消费 worker 数。0(缺省) = 2 × CPU 核数。
+         * 消息面与下行通道各自有一套同构的 worker 池, 都取这个大小。
+         */
+        public int consumerThreadsOrDefault() {
+            return consumerThreads > 0 ? consumerThreads
+                    : Runtime.getRuntime().availableProcessors() * 2;
         }
 
         /**

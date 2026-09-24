@@ -106,4 +106,44 @@ class KafkaClusterBusLifecycleTest {
         bus.stop();
         assertFalse(bus.isRunning());
     }
+
+    @Test
+    @DisplayName("下行通道: worker 池按 consumer-threads 创建、指标可见、stop 后线程不残留")
+    void downlinkWorkersLifecycle() throws InterruptedException {
+        java.util.Set<Thread> baseline = allKafkaWorkerThreads();
+        BrokerProperties.KafkaProperties kafka = new BrokerProperties.KafkaProperties(
+                true, "127.0.0.1:19092", "jmqtt", "jmqtt-cluster", null,
+                true, List.of(), "", List.of(), false, 1000, 1000, 200,
+                2, "none", "latest", "topic", null, null,
+                List.of(new BrokerProperties.KafkaProperties.Downlink("downlink-topic")));
+        KafkaClusterBus bus = new KafkaClusterBus(
+                TestBrokerProperties.create("node-1", 32, 1000, kafka),
+                null, (clientId, fromNodeId) -> { });
+        try {
+            bus.start();
+            assertTrue(bus.isRunning(), "无 broker 时总线仍应启动(连接惰性)");
+            assertTrue(bus.stats().get("downlinkWorkers") == 2L,
+                    "下行 worker 池应按 consumer-threads 创建: " + bus.stats().get("downlinkWorkers"));
+        } finally {
+            bus.stop();
+        }
+        assertFalse(bus.isRunning());
+        // 消息面 + 下行两类 worker 都必须退场
+        long deadline = System.currentTimeMillis() + 3000;
+        boolean gone = false;
+        while (!(gone = allKafkaWorkerThreads().stream().noneMatch(t -> !baseline.contains(t)))) {
+            if (System.currentTimeMillis() > deadline) {
+                break;
+            }
+            Thread.sleep(50);
+        }
+        assertTrue(gone, "停止后不得残留本次启动的 worker 线程");
+    }
+
+    private static java.util.Set<Thread> allKafkaWorkerThreads() {
+        return Thread.getAllStackTraces().keySet().stream()
+                .filter(t -> t.getName().startsWith("jmqtt-kafka-worker-")
+                        || t.getName().startsWith("jmqtt-kafka-downlink-worker-"))
+                .collect(java.util.stream.Collectors.toSet());
+    }
 }
