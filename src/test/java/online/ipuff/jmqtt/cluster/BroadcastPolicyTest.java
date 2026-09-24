@@ -137,7 +137,7 @@ class BroadcastPolicyTest {
         // 不调用 start(): 本组用例只验证策略判断, 不需要连接 Kafka。
         // internalSendServer / takeoverListener 在这条路径上不会被触达。
         return new KafkaClusterBus(properties, null, (clientId, fromNodeId) -> {
-        });
+        }, new online.ipuff.jmqtt.subscribe.SubscribeStoreService());
     }
 
     /** 与 ClusterBusTest 的同类辅助保持一致, 便于两个文件对照阅读 */

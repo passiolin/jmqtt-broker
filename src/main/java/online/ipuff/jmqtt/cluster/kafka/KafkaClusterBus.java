@@ -22,6 +22,7 @@ import online.ipuff.jmqtt.cluster.TakeoverListener;
 import online.ipuff.jmqtt.config.BrokerProperties;
 import online.ipuff.jmqtt.router.MqttTopic;
 import online.ipuff.jmqtt.router.TopicTrie;
+import online.ipuff.jmqtt.subscribe.ISubscribeStoreService;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -98,6 +99,7 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
     private final BrokerProperties properties;
     private final InternalSendServer internalSendServer;
     private final TakeoverListener takeoverListener;
+    private final online.ipuff.jmqtt.subscribe.ISubscribeStoreService subscribeStoreService;
 
     /**
      * 出站队列: publish() 只做入队, 由独立线程消费。
@@ -151,13 +153,16 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
     private final AtomicLong uplinkCount = new AtomicLong();
     private final AtomicLong takeoverAppliedCount = new AtomicLong();
     private final AtomicLong broadcastSkippedCount = new AtomicLong();
+    private final AtomicLong skippedNoLocalSubCount = new AtomicLong();
 
     public KafkaClusterBus(BrokerProperties properties,
                            InternalSendServer internalSendServer,
-                           TakeoverListener takeoverListener) {
+                           TakeoverListener takeoverListener,
+                           online.ipuff.jmqtt.subscribe.ISubscribeStoreService subscribeStoreService) {
         this.properties = properties;
         this.internalSendServer = internalSendServer;
         this.takeoverListener = takeoverListener;
+        this.subscribeStoreService = subscribeStoreService;
         this.outbox = new ArrayBlockingQueue<>(properties.kafka().queueCapacity());
         initUplinkMatcher();
         initBroadcastMatcher();
@@ -730,6 +735,14 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
     }
 
     private void handlePublish(ConsumerRecord<String, byte[]> record) {
+        // 早期过滤: Kafka record 的 key 即 MQTT 主题。先查本地订阅树,
+        // 无匹配订阅者则跳过反序列化和投递 —— 30 万连接下大多数消息
+        // 只涉及本节点 1~2 个订阅者, 远端节点的无效消费占了大量 CPU。
+        String topic = record.key();
+        if (topic != null && subscribeStoreService.search(topic).isEmpty()) {
+            skippedNoLocalSubCount.incrementAndGet();
+            return;
+        }
         InternalMessage message = ClusterRecords.fromRecord(record);
         if (message == null) {
             log.debug("丢弃无法解码的集群记录, offset={}", record.offset());
@@ -1088,6 +1101,7 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
         stats.put("dropped", droppedCount.get());
         stats.put("received", receivedCount.get());
         stats.put("skippedSelf", skippedSelfCount.get());
+        stats.put("skippedNoLocalSub", skippedNoLocalSubCount.get());
         stats.put("uplink", uplinkCount.get());
         stats.put("takeoverApplied", takeoverAppliedCount.get());
         // 因广播开关/过滤器而未进消息面的条数。它是「这个开关省下了多少」的唯一量化口径,

@@ -51,7 +51,7 @@ class KafkaClusterBusLifecycleTest {
         // 基线快照: 其他测试(如缓存的 Spring 上下文)可能遗留同名线程, 只断言本次新增的消失
         java.util.Set<Thread> baseline = workerThreads();
         KafkaClusterBus bus = new KafkaClusterBus(props(3),
-                null, (clientId, fromNodeId) -> { });
+                null, (clientId, fromNodeId) -> { }, new online.ipuff.jmqtt.subscribe.SubscribeStoreService());
         try {
             bus.start();
             assertTrue(bus.isRunning(), "无 broker 时总线仍应启动(连接惰性)");
@@ -99,7 +99,7 @@ class KafkaClusterBusLifecycleTest {
     @DisplayName("consumer-threads=1: 与串行消费等价的默认形态同样能启停")
     void singleWorkerLifecycle() {
         KafkaClusterBus bus = new KafkaClusterBus(props(1),
-                null, (clientId, fromNodeId) -> { });
+                null, (clientId, fromNodeId) -> { }, new online.ipuff.jmqtt.subscribe.SubscribeStoreService());
         bus.start();
         assertTrue(bus.isRunning());
         assertTrue(bus.stats().get("consumerThreads") == 1L);
@@ -118,7 +118,7 @@ class KafkaClusterBusLifecycleTest {
                 List.of(new BrokerProperties.KafkaProperties.Downlink("downlink-topic")));
         KafkaClusterBus bus = new KafkaClusterBus(
                 TestBrokerProperties.create("node-1", 32, 1000, kafka),
-                null, (clientId, fromNodeId) -> { });
+                null, (clientId, fromNodeId) -> { }, new online.ipuff.jmqtt.subscribe.SubscribeStoreService());
         try {
             bus.start();
             assertTrue(bus.isRunning(), "无 broker 时总线仍应启动(连接惰性)");
