@@ -42,7 +42,12 @@ import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Netty 接入层, 负责启动 MQTT/TCP 与 MQTT/WebSocket 两个监听器。
@@ -70,6 +75,9 @@ public class BrokerServer implements SmartLifecycle {
     private Channel mqttChannel;
     private Channel webSocketChannel;
     private boolean useEpoll;
+
+    private final AtomicInteger connectCount = new AtomicInteger();
+    private final AtomicLong connectWindowStart = new AtomicLong(System.currentTimeMillis());
 
     public BrokerServer(BrokerProperties properties,
                         MqttBrokerHandler brokerHandler,
@@ -161,6 +169,25 @@ public class BrokerServer implements SmartLifecycle {
         }
     }
 
+    /**
+     * 接入限速: 固定窗口计数器。超速返回 false, 调用方应排队等待而非拒绝。
+     * 窗口边界允许 2 倍突发, 对接入限流而言足够精确。
+     */
+    private boolean tryAcquireConnect() {
+        int maxPerSec = properties.connectRatePerSecondOrDefault();
+        if (maxPerSec == Integer.MAX_VALUE) {
+            return true;
+        }
+        long now = System.currentTimeMillis();
+        long window = connectWindowStart.get();
+        if (now - window >= 1000) {
+            if (connectWindowStart.compareAndSet(window, now)) {
+                connectCount.set(0);
+            }
+        }
+        return connectCount.incrementAndGet() <= maxPerSec;
+    }
+
     private ServerBootstrap baseBootstrap(ChannelInitializer<SocketChannel> childInitializer) {
         ServerBootstrap bootstrap = new ServerBootstrap();
         bootstrap.group(bossGroup, workerGroup)
@@ -187,15 +214,29 @@ public class BrokerServer implements SmartLifecycle {
         ServerBootstrap bootstrap = baseBootstrap(new ChannelInitializer<SocketChannel>() {
             @Override
             protected void initChannel(SocketChannel socketChannel) {
-                socketChannel.pipeline()
-                        // 默认心跳; CONNECT 之后会按客户端协商的 keepAlive 重建
-                        .addFirst("idle", new IdleStateHandler(0, 0, properties.defaultKeepAlive()))
-                        .addLast("mqttDecoder", new MqttDecoder(properties.maxPayloadSize()))
-                        .addLast("mqttEncoder", MqttEncoder.INSTANCE)
-                        .addLast("broker", brokerHandler);
+                if (tryAcquireConnect()) {
+                    initMqttPipeline(socketChannel);
+                } else {
+                    // 接入限速: 不拒绝, 排队等待下一个可用窗口。
+                    // 客户端只会看到更长的接入延迟, 不会收到拒绝。
+                    socketChannel.eventLoop().schedule(() -> {
+                        if (socketChannel.isOpen() && running.get()) {
+                            initChannel(socketChannel);
+                        }
+                    }, 50, TimeUnit.MILLISECONDS);
+                }
             }
         });
         this.mqttChannel = bind(bootstrap, properties.port());
+    }
+
+    private void initMqttPipeline(SocketChannel ch) {
+        ch.pipeline()
+                // 默认心跳; CONNECT 之后会按客户端协商的 keepAlive 重建
+                .addFirst("idle", new IdleStateHandler(0, 0, properties.defaultKeepAlive()))
+                .addLast("mqttDecoder", new MqttDecoder(properties.maxPayloadSize()))
+                .addLast("mqttEncoder", MqttEncoder.INSTANCE)
+                .addLast("broker", brokerHandler);
     }
 
     private void startWebSocketServer() throws InterruptedException {

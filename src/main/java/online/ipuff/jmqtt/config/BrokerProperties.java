@@ -50,6 +50,8 @@ public record BrokerProperties(
         @DefaultValue("0") @Min(0) int bossThreads,
         @Min(0) int workerThreads,
         boolean useEpoll,
+        /** 每秒新建连接上限, 0 表示不限速。超速的连接在 event loop 上排队等待, 不拒绝。 */
+        @DefaultValue("4096") @Min(0) int connectRatePerSecond,
 
         boolean authEnabled,
         String authUsername,
@@ -111,6 +113,13 @@ public record BrokerProperties(
      */
     public int workerThreadsOrDefault() {
         return workerThreads > 0 ? workerThreads : Runtime.getRuntime().availableProcessors() * 2;
+    }
+
+    /**
+     * 每秒新建连接上限。0 表示不限速。
+     */
+    public int connectRatePerSecondOrDefault() {
+        return connectRatePerSecond > 0 ? connectRatePerSecond : Integer.MAX_VALUE;
     }
 
     /**

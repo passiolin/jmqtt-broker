@@ -550,6 +550,7 @@ class ClusterBusTest {
                 1,
                 2,
                 false,
+                4096,
                 false,
                 "jmqtt",
                 "jmqtt",

@@ -69,7 +69,7 @@ public final class TestBrokerProperties {
                 false, "127.0.0.1", 6379, null, 0, "jmqtt", 1000, 5000, "off", 100, 10000, "standalone", null, null);
         return new BrokerProperties(
                 nodeId, null, 1883, true, 8083, "/mqtt",
-                1, 2, false,
+                1, 2, false, 4096,
                 authEnabled, authUsername, authPassword,
                 60, 7200, 0, 0, maxInflight, 1000, maxOfflineQueueLen,
                 false, kafka, redis,

@@ -127,7 +127,7 @@ class BroadcastPolicyTest {
     private static KafkaClusterBus newBus(BrokerProperties.KafkaProperties kafka) {
         BrokerProperties properties = new BrokerProperties(
                 "node-1", null, 1883, true, 8083, "/mqtt",
-                1, 2, false,
+                1, 2, false, 4096,
                 false, "jmqtt", "jmqtt",
                 60, 7200, 0, 0, 32, 1000, 1000,
                 true, kafka,

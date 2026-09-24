@@ -350,7 +350,7 @@ class InternalSendServerTest {
                 false, "127.0.0.1", 6379, null, 0, "jmqtt", 1000, 5000, "off", 100, 10000, "standalone", null, null);
         return new BrokerProperties(
                 PROP_NODE, null, 1883, true, 8083, "/mqtt",
-                1, 2, false,
+                1, 2, false, 4096,
                 false, "jmqtt", "jmqtt",
                 60, 7200, 0, 0, 32, 1000, offlineQueueLen,
                 false, kafka, redis,

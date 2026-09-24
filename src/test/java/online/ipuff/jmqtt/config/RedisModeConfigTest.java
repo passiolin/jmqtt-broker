@@ -45,7 +45,7 @@ class RedisModeConfigTest {
         return new BrokerProperties(
                 base.id(), base.host(), base.port(), base.websocketEnabled(),
                 base.websocketPort(), base.websocketPath(),
-                base.bossThreads(), base.workerThreads(), base.useEpoll(),
+                base.bossThreads(), base.workerThreads(), base.useEpoll(), base.connectRatePerSecond(),
                 base.authEnabled(), base.authUsername(), base.authPassword(),
                 base.defaultKeepAlive(), base.sessionExpirySeconds(), base.topicAliasMaximum(),
                 base.serverKeepAlive(), base.maxInflight(), base.maxMqueueLen(), base.maxOfflineQueueLen(),

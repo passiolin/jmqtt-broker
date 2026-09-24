@@ -52,6 +52,9 @@ jmqtt:
     # boss 线程数, 缺省 0 = 与 CPU 核数相同
     # (单端口监听下实际只有 1 个 loop 承接 accept, 多出的线程为多端口/高频接入留余量)
     boss-threads: 0
+    # 每秒新建连接上限, 缺省 4096; 超速的连接排队等待(不拒绝)
+    # 0 表示不限速。客户端只看到更长的接入延迟, 不会被拒绝
+    connect-rate-per-second: 4096
     # worker 线程数, 0 表示 2 * CPU 核数
     worker-threads: 0
     # 是否使用 Linux epoll 传输, 无 native 库时自动降级为 NIO
