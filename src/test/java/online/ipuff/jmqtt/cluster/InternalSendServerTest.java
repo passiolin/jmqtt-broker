@@ -332,7 +332,10 @@ class InternalSendServerTest {
 
     private InternalSendServer buildServer(BrokerProperties props) {
         return new InternalSendServer(subscribeStoreService, connectionRegistry, new MessageIdService(),
-                dupStore, sessionStoreService, pendingStore, props, metrics, new QosMetrics(),
+                dupStore, sessionStoreService, pendingStore,
+                new online.ipuff.jmqtt.store.OfflineEnqueueBuffer(pendingStore, props.maxOfflineQueueLen(),
+                        online.ipuff.jmqtt.store.OfflineEnqueueBuffer.DEFAULT_MAX_BUFFERED, true),
+                props, metrics, new QosMetrics(),
                 new online.ipuff.jmqtt.admin.TopicCaptureService(
                         online.ipuff.jmqtt.TestObjectProviders.empty(),
                         new online.ipuff.jmqtt.admin.AdminRedisKeys(props), props));

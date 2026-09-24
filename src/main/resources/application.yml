@@ -307,7 +307,7 @@ jmqtt:
       command-result-ttl-seconds: 3600
 
     # 网络参数
-    so-backlog: 511
+    so-backlog: 65535
     so-keep-alive: true
     tcp-no-delay: true
     # 单条报文最大长度, 默认 10MB

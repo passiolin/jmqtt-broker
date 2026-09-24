@@ -53,6 +53,22 @@ public interface IPendingMessageStore {
     int enqueue(String clientId, PendingMessage message, int maxLen);
 
     /**
+     * 批量入队(异步缓冲的后台刷盘路径): 一个客户端的多条消息尽量一次往返完成,
+     * 保持入队顺序, 超限丢最旧。
+     *
+     * <p>默认实现逐条转调 {@link #enqueue}; 有批量能力的实现(Redis Lua)应覆盖。
+     *
+     * @return 本次因超限被丢弃的消息条数
+     */
+    default int enqueueBatch(String clientId, List<PendingMessage> messages, int maxLen) {
+        int dropped = 0;
+        for (PendingMessage message : messages) {
+            dropped += enqueue(clientId, message, maxLen);
+        }
+        return dropped;
+    }
+
+    /**
      * 取出并移除最多 {@code limit} 条消息(保持入队顺序)。
      *
      * <p>分批而不是一次取空: 客户端在投递过程中断开时, 尚未取出的部分仍留在队列里,

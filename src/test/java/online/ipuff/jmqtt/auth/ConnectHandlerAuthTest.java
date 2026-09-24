@@ -103,6 +103,9 @@ class ConnectHandlerAuthTest {
         InternalSendServer internalSendServer = new InternalSendServer(
                 subscribeStoreService, connectionRegistry, new MessageIdService(),
                 dupPublishStore, sessionStoreService, new InMemoryPendingMessageStore(),
+                new online.ipuff.jmqtt.store.OfflineEnqueueBuffer(new InMemoryPendingMessageStore(),
+                        props.maxOfflineQueueLen(),
+                        online.ipuff.jmqtt.store.OfflineEnqueueBuffer.DEFAULT_MAX_BUFFERED, true),
                 props, backpressureMetrics, new QosMetrics(),
                 new online.ipuff.jmqtt.admin.TopicCaptureService(
                         online.ipuff.jmqtt.TestObjectProviders.empty(),

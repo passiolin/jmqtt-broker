@@ -113,7 +113,11 @@ class PublishHandlerAclTest {
         InternalSendServer sendServer = new InternalSendServer(
                 subscribeStoreService, registry, new MessageIdService(),
                 new DupPublishMessageStoreService(), sessionStoreService,
-                new InMemoryPendingMessageStore(), props, metrics, new QosMetrics(),
+                new InMemoryPendingMessageStore(),
+                new online.ipuff.jmqtt.store.OfflineEnqueueBuffer(new InMemoryPendingMessageStore(),
+                        props.maxOfflineQueueLen(),
+                        online.ipuff.jmqtt.store.OfflineEnqueueBuffer.DEFAULT_MAX_BUFFERED, true),
+                props, metrics, new QosMetrics(),
                 new online.ipuff.jmqtt.admin.TopicCaptureService(
                         online.ipuff.jmqtt.TestObjectProviders.empty(),
                         new online.ipuff.jmqtt.admin.AdminRedisKeys(props), props));

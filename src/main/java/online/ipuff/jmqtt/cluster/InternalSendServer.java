@@ -29,6 +29,7 @@ import online.ipuff.jmqtt.session.SessionStore;
 import online.ipuff.jmqtt.store.IDupPublishMessageStoreService;
 import online.ipuff.jmqtt.store.IMessageIdService;
 import online.ipuff.jmqtt.store.IPendingMessageStore;
+import online.ipuff.jmqtt.store.OfflineEnqueueBuffer;
 import online.ipuff.jmqtt.store.PendingMessage;
 import online.ipuff.jmqtt.subscribe.SubscribeStoreService;
 import org.slf4j.Logger;
@@ -65,6 +66,7 @@ public class InternalSendServer {
     private final IDupPublishMessageStoreService dupPublishMessageStoreService;
     private final ISessionStoreService sessionStoreService;
     private final IPendingMessageStore pendingMessageStore;
+    private final OfflineEnqueueBuffer offlineEnqueueBuffer;
     private final BrokerProperties properties;
     private final online.ipuff.jmqtt.admin.TopicCaptureService captureService;
     private final BackpressureMetrics metrics;
@@ -76,6 +78,7 @@ public class InternalSendServer {
                              IDupPublishMessageStoreService dupPublishMessageStoreService,
                              ISessionStoreService sessionStoreService,
                              IPendingMessageStore pendingMessageStore,
+                             OfflineEnqueueBuffer offlineEnqueueBuffer,
                              BrokerProperties properties,
                              BackpressureMetrics metrics,
                              QosMetrics qosMetrics,
@@ -86,6 +89,7 @@ public class InternalSendServer {
         this.dupPublishMessageStoreService = dupPublishMessageStoreService;
         this.sessionStoreService = sessionStoreService;
         this.pendingMessageStore = pendingMessageStore;
+        this.offlineEnqueueBuffer = offlineEnqueueBuffer;
         this.properties = properties;
         this.captureService = captureService;
         this.metrics = metrics;
@@ -148,6 +152,8 @@ public class InternalSendServer {
      */
     public int deliverPendingMessages(String clientId, Channel channel) {
         int delivered = 0;
+        // 异步缓冲里滞留的消息比存储里的新: 先清存储积压, 再补投缓冲尾部, 保住时序
+        List<PendingMessage> stillBuffered = offlineEnqueueBuffer.drainClient(clientId);
         while (channel.isActive()) {
             // 窗口已满就停: 尚未取出的积压继续留在持久队列里, 等确认腾出窗口后再取。
             // 若在这里一次取空, 多出来的部分会退化成连接级的发送队列 ——
@@ -166,6 +172,17 @@ public class InternalSendServer {
                         message.qos(), message.retain(), false);
                 delivered++;
             }
+        }
+        for (PendingMessage message : stillBuffered) {
+            SendBuffer buffer = channel.attr(ChannelAttributes.SEND_BUFFER).get();
+            if (buffer != null && !buffer.hasWindow()) {
+                // 窗口满: 剩余滞留消息放回缓冲头部(保序), 随后台刷盘落存储等下次重连
+                offlineEnqueueBuffer.requeueFront(clientId, List.of(message));
+                continue;
+            }
+            deliver(channel, clientId, message.topic(), message.payload(),
+                    message.qos(), message.retain(), false);
+            delivered++;
         }
         if (delivered > 0) {
             log.info("已投递离线消息: clientId={} 条数={}", clientId, delivered);
@@ -194,8 +211,9 @@ public class InternalSendServer {
         if (session == null || !session.isPersistent()) {
             return;
         }
-        pendingMessageStore.enqueue(clientId, PendingMessage.of(topic, qos, payload, retain),
-                properties.maxOfflineQueueLen());
+        // 异步缓冲: 投递线程永不阻塞在 Redis 上(压测实测同步写会在高存量下
+        // 被在途镜像刷盘挤占, 单条秒级, 拖死整条下行)。批量刷盘由缓冲后台完成。
+        offlineEnqueueBuffer.submit(clientId, PendingMessage.of(topic, qos, payload, retain));
     }
 
     /**

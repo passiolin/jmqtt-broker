@@ -45,8 +45,7 @@ import org.springframework.stereotype.Service;
  * 流程仍能收敛 —— 客户端库的超时策略会重发 PUBREC/PUBREL, 新节点对两者都幂等
  * (PUBREC 照常补出 PUBREL, PUBREL 照常回 PUBCOMP) —— 但依赖客户端超时, 不是服务端主动补发。
  * 另见接收方向 QoS 2 标识符集合的遗留说明({@code IInboundQos2Store})。
- */
-@Service
+ */@Service
 public class SessionTakeoverService implements TakeoverListener {
 
     private static final Logger log = LoggerFactory.getLogger(SessionTakeoverService.class);
@@ -54,10 +53,10 @@ public class SessionTakeoverService implements TakeoverListener {
     private final ConnectionRegistry connectionRegistry;
     private final ISessionStoreService sessionStoreService;
     private final ISubscribeStoreService subscribeStoreService;
+    private final IInboundQos2Store inboundQos2Store;
     private final IDupPublishMessageStoreService dupPublishMessageStoreService;
     private final IDupPubRelMessageStoreService dupPubRelMessageStoreService;
     private final IPendingMessageStore pendingMessageStore;
-    private final IInboundQos2Store inboundQos2Store;
     private final online.ipuff.jmqtt.metrics.NodeMetricsService nodeMetricsService;
 
     public SessionTakeoverService(ConnectionRegistry connectionRegistry,
@@ -82,9 +81,20 @@ public class SessionTakeoverService implements TakeoverListener {
     public void onTakeover(String clientId, String fromNodeId) {
         Channel channel = connectionRegistry.get(clientId);
         if (channel == null) {
-            // 本节点已不再持有该 clientId(可能刚自然断开, 或接管消息重复到达)
-            log.debug("收到接管通知但本节点未持有该连接, 忽略: clientId={} 接管方={}",
-                    clientId, fromNodeId);
+            // 无活跃连接: 设备此前已从本节点断开, 但持久会话与订阅仍留在本节点
+            // (保留至过期是 MQTT 语义)。此时会话归属已迁往接管方节点 ——
+            // 若不清理本地副本, 本节点会在最长一个会话过期周期内继续为它
+            // 入队离线消息, 与接管方节点双写。清理本地副本, 停止入队。
+            if (sessionStoreService.get(clientId) == null) {
+                // 本地既无连接也无会话: 接管消息重复到达, 忽略即可
+                log.debug("收到接管通知但本节点未持有该连接与会话, 忽略: clientId={} 接管方={}",
+                        clientId, fromNodeId);
+                return;
+            }
+            log.info("收到跨节点接管通知: clientId={} 会话已迁至节点 [{}], "
+                    + "本节点无活跃连接, 清理残留的会话与订阅副本", clientId, fromNodeId);
+            cleanLocalRuntimeState(clientId, null);
+            // 持久离线队列已随会话归属新节点, 本地不动
             return;
         }
         nodeMetricsService.takeoverRemote();
@@ -104,24 +114,7 @@ public class SessionTakeoverService implements TakeoverListener {
         channel.close();
 
         // 4) 清理本地运行时状态
-        int subscriptions = subscribeStoreService.removeForClient(clientId);
-        // detach 而非 removeByClient: 只清本节点内存, 持久镜像留给接管方节点加载。
-        // 用 removeByClient 会把镜像一起删掉, 等于销毁新节点该投递的消息。
-        dupPublishMessageStoreService.detach(clientId);
-        dupPubRelMessageStoreService.removeByClient(clientId);
-        // 接收方向的 QoS 2 状态是「这一轮流程在<b>本节点</b>进行到哪」, 不随会话迁移。
-        // 留在本节点既无用(客户端已在别处)又会挡住将来同标识符的新流程
-        inboundQos2Store.clearClient(clientId);
-
-        if (inflight > 0) {
-            // 内存态在这里结束, 但持久镜像已保留(detach): 客户端在接管方节点重连时,
-            // 镜像被加载回来并以 dup=1 且原报文标识符重发 —— 消息本身并不丢。
-            // 真正留下的缺口是 PUBREL 半程状态(上面已清): 服务端不会再主动重发未送达的 PUBREL,
-            // 流程靠客户端超时重发 PUBREC/PUBREL 收敛, 新节点对两者都幂等。
-            log.info("接管清理释放本节点在途状态 {} 条: clientId={}。持久镜像已保留, "
-                            + "由接管方节点在客户端重连时加载重发",
-                    inflight, clientId);
-        }
+        cleanLocalRuntimeState(clientId, channel);
 
         // 5) 离线积压队列
         //    持久队列<b>不动</b> —— 它已随会话归属新节点, 删掉等于销毁新节点该投递的消息。
@@ -135,8 +128,36 @@ public class SessionTakeoverService implements TakeoverListener {
             pendingMessageStore.removeAll(clientId);
         }
 
-        // 注意: 不触碰 SessionPersistence —— 会话此刻已归属接管方节点
-        log.debug("接管清理完成: clientId={} 清除订阅 {} 条, 释放本节点在途 {} 条(镜像保留)",
-                clientId, subscriptions, inflight);
+        log.info("接管清理完成: clientId={} 释放本节点在途 {} 条(持久镜像保留)",
+                clientId, inflight);
+    }
+
+    /**
+     * 清理本节点为某客户端保留的运行时状态(会话、订阅、在途、QoS2)。
+     *
+     * <p>持久会话的设备断开后, 会话与订阅会在本节点存活至过期 —— 这是 MQTT 语义。
+     * 但一旦收到接管通知(设备已连到其他节点), 继续保留副本会让本节点持续为它
+     * 入队离线消息, 与接管方节点双写。清理的是<b>本地副本</b>:
+     * 会话与订阅的权威副本已由接管方节点从持久层恢复。
+     *
+     * @param channel 本节点上的活跃连接; 可为 null(设备早已断开的场景)
+     */
+    private void cleanLocalRuntimeState(String clientId, Channel channel) {
+        // 先移除会话 —— 有连接时这样随后的 channelInactive 不会误发遗嘱
+        sessionStoreService.remove(clientId);
+
+        if (channel != null) {
+            connectionRegistry.unregister(clientId, channel);
+        }
+
+        int subscriptions = subscribeStoreService.removeForClient(clientId);
+        // detach 而非 removeByClient: 只清本节点内存, 持久镜像留给接管方节点加载。
+        // 用 removeByClient 会把镜像一起删掉, 等于销毁新节点该投递的消息。
+        dupPublishMessageStoreService.detach(clientId);
+        dupPubRelMessageStoreService.removeByClient(clientId);
+        // 接收方向的 QoS 2 状态是「这一轮流程在本节点进行到哪」, 不随会话迁移。
+        // 留在本节点既无用(客户端已在别处)又会挡住将来同标识符的新流程
+        inboundQos2Store.clearClient(clientId);
+        log.debug("接管清理完成: clientId={} 清除订阅 {} 条", clientId, subscriptions);
     }
 }

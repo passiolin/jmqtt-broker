@@ -81,6 +81,28 @@ public class RedisPendingMessageStore implements IPendingMessageStore {
                     + "end "
                     + "return dropped";
 
+    /**
+     * 批量入队脚本: 一次 EVAL 携带同一客户端的多条消息(RPUSH 循环) → 超限 LTRIM
+     * → 按会话 expire 续期。IO 次数从「每消息一次往返」降为「每客户端每轮一次」。
+     */
+    private static final String ENQUEUE_BATCH_SCRIPT =
+            "local max = tonumber(ARGV[1]) "
+                    + "local dropped = 0 "
+                    + "for i = 2, #ARGV do "
+                    + "  redis.call('RPUSH', KEYS[1], ARGV[i]) "
+                    + "end "
+                    + "local len = redis.call('LLEN', KEYS[1]) "
+                    + "if max > 0 and len > max then "
+                    + "  redis.call('LTRIM', KEYS[1], len - max, -1) "
+                    + "  dropped = len - max "
+                    + "end "
+                    + "local expire = redis.call('HGET', KEYS[2], 'expire') "
+                    + "if expire then "
+                    + "  local ttl = tonumber(expire) "
+                    + "  if ttl and ttl > 0 then redis.call('EXPIRE', KEYS[1], ttl) end "
+                    + "end "
+                    + "return dropped";
+
     /** 取出并移除前 limit 条。两条命令必须原子, 否则并发取队列会拿到重复消息。 */
     private static final String DRAIN_SCRIPT =
             "local limit = tonumber(ARGV[1]) "
@@ -150,6 +172,41 @@ public class RedisPendingMessageStore implements IPendingMessageStore {
             }
         }
         return dropped.intValue();
+    }
+
+    /**
+     * 批量入队: 同一客户端的多条消息合并为一次 EVAL。
+     * 消失窗口与单条版一致: Redis 不可用时返回丢弃计数, 由调用方观察指标。
+     */
+    @Override
+    public int enqueueBatch(String clientId, List<PendingMessage> messages, int maxLen) {
+        if (messages == null || messages.isEmpty()) {
+            return 0;
+        }
+        if (maxLen <= 0) {
+            droppedCount.addAndGet(messages.size());
+            return messages.size();
+        }
+        String[] argv = new String[messages.size() + 1];
+        argv[0] = Integer.toString(maxLen);
+        for (int i = 0; i < messages.size(); i++) {
+            String payload = encode(messages.get(i));
+            if (payload == null) {
+                argv[i + 1] = "";
+            } else {
+                argv[i + 1] = payload;
+            }
+        }
+        Long dropped = redis.execute("queue.enqueueBatch", () -> redis.commands().eval(
+                ENQUEUE_BATCH_SCRIPT,
+                ScriptOutputType.INTEGER,
+                new String[]{queueKey(clientId), sessionKey(clientId)},
+                argv), Long.valueOf(0));
+        int d = dropped == null ? 0 : dropped.intValue();
+        if (d > 0) {
+            droppedCount.addAndGet(d);
+        }
+        return d;
     }
 
     @Override
