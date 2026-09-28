@@ -10,16 +10,16 @@
 seq 三集合差做丢失归因,自适应错峰接入,持久会话(Redis 参与接入路径)。
 以下为最新一轮实测数据。
 
-### 压测环境(PVE 10.10.10.44,CPU: Intel Xeon E5-2698B v3 @ 2.00GHz,16 核 32 线程,2.0GHz)
+### 压测环境(PVE <PVE_HOST>,CPU: Intel Xeon E5-2698B v3 @ 2.00GHz,16 核 32 线程,2.0GHz)
 
 | VM | 名称 | 规格 | 地址 | 角色 |
 |---|---|---|---|---|
-| 105 | jmqtt-broker | 8C / 16G / 60G NVMe(JVM 12G) | 10.10.10.104 | **被测对象**,单节点 |
-| 106/111 | bench-device ×2 | 各 8C / 16G / 40G NVMe,各 7-8 个源 IP | 10.10.10.105-.111 / .162-.169 | 模拟终端(合计 ≤90 万连接) |
-| 107 | bench-backend | 4C / 8G / 40G NVMe | 10.10.10.130 | 模拟后台(Kafka 收发 + report) |
-| 108 | bench-kafka | 4C / 8G / 60G NVMe | 10.10.10.128 | Kafka 4.1.2 KRaft 单节点 |
-| 110 | bench-redis | 2C / 4G / 40G NVMe | 10.10.10.131 | Redis(会话持久化) |
-| 109 | bench-monitor | 2C / 4G | 10.10.10.129 | Prometheus + Grafana |
+| 105 | jmqtt-broker | 8C / 16G / 60G NVMe(JVM 12G) | <BROKER_HOST> | **被测对象**,单节点 |
+| 106/111 | bench-device ×2 | 各 8C / 16G / 40G NVMe,各 7-8 个源 IP | <DEVICE_HOST_1>-.111 / .162-.169 | 模拟终端(合计 ≤90 万连接) |
+| 107 | bench-backend | 4C / 8G / 40G NVMe | <BACKEND_HOST> | 模拟后台(Kafka 收发 + report) |
+| 108 | bench-kafka | 4C / 8G / 60G NVMe | <KAFKA_HOST> | Kafka 4.1.2 KRaft 单节点 |
+| 110 | bench-redis | 2C / 4G / 40G NVMe | <REDIS_HOST> | Redis(会话持久化) |
+| 109 | bench-monitor | 2C / 4G | <MONITOR_HOST> | Prometheus + Grafana |
 
 Kafka topics: `jmqtt-uplink` 16 分区 / `jmqtt-downlink` 8 分区,retention 1h。
 broker 基线:单节点,`consumer-threads=0`(2×核=16,含下行 worker 池)、
