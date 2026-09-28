@@ -82,6 +82,20 @@ public class NodeMetricsService {
     private final AtomicLong connectionTakeoverLocal = new AtomicLong();
     private final AtomicLong connectionTakeoverRemote = new AtomicLong();
 
+    // ---- 协议报文计数(按报文类型, ConcurrentHashMap 保证并发安全) ----
+    private final java.util.concurrent.ConcurrentHashMap<String, AtomicLong> packetCounters =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 收到一个 MQTT 协议报文(由 MqttBrokerHandler 在 switch 路由前调用) */
+    public void packetReceived(String packetType) {
+        packetCounters.computeIfAbsent(packetType, k -> new AtomicLong()).incrementAndGet();
+    }
+
+    /** 当前已注册的所有报文类型计数器(只读快照, Micrometer 绑定用) */
+    public Map<String, AtomicLong> packetCounters() {
+        return java.util.Collections.unmodifiableMap(packetCounters);
+    }
+
     public NodeMetricsService(QosMetrics qosMetrics,
                               BackpressureMetrics backpressureMetrics,
                               ConnectionRegistry connectionRegistry,
@@ -229,6 +243,13 @@ public class NodeMetricsService {
                     connectionTakeoverLocal::get);
             bindCounter(registry, "jmqtt.connections.takeover", "type", "remote",
                     connectionTakeoverRemote::get);
+
+            // 协议报文计数(PINGREQ/SUBSCRIBE/DISCONNECT 等全量覆盖)
+            for (Map.Entry<String, AtomicLong> entry : packetCounters.entrySet()) {
+                String type = entry.getKey();
+                bindCounter(registry, "jmqtt.packets.received", "type", type,
+                        entry.getValue()::get);
+            }
 
             ClusterBusStats bus = busStats.getIfAvailable();
             if (bus != null) {

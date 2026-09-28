@@ -139,6 +139,9 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
             return;
         }
 
+        // 协议报文计数: 在 switch 路由前统一计数, 覆盖所有报文类型
+        nodeMetricsService.packetReceived(msg.fixedHeader().messageType().name());
+
         switch (msg.fixedHeader().messageType()) {
             case CONNECT -> protocolProcessor.connect()
                     .processConnect(channel, (MqttConnectMessage) msg);
