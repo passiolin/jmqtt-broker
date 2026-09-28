@@ -2,10 +2,32 @@
 
 基于 **Netty + Spring Boot** 的 MQTT Broker，单模块 Maven 工程，支持 MQTT 3.1.1 与 5.0。
 
-设计的出发点是一件事：**投递路径上不能有任何外部依赖**。
-路由匹配的成本应该是「主题有多深」的函数，而不是「订阅有多少条」的函数；
-集群的复杂度应该落在「谁有事做」上，而不是「谁来同意谁有事做」。
-下面两节分别展开。
+## 设计
+
+每条 PUBLISH 从收包、路由到写给订阅者，只接触进程内存。Redis（会话、订阅、在途镜像）
+只出现在低频路径 —— 连接、重连、接管、订阅变更 —— 且都是 write-back 镜像；
+Kafka 若启用，只承担集群消息总线与上行数据面，同样不在路由路径上。
+收益有两层：外部往返不进入单条消息的延迟，外部故障也不拖垮本地投递。
+
+### 路由
+
+订阅关系存放在内存主题树（前缀树）里，匹配 `a/b/c` 就是沿树走三层，
+与订阅总数无关 —— 连接从 1 万涨到 40 万，匹配步数不变。
+朴素做法（每次发布全量拉取订阅、逐条比对通配符）的复杂度是 O(订阅总数)，
+连接规模一上来就走不通。读路径无锁（弱一致迭代，新订阅最多晚一次投递生效），
+写路径单把锁只串行化本节点的订阅变更，属低频操作。
+
+### 集群
+
+节点完全对称、没有 leader，也没有任何「先协调再投递」的环节：
+
+- 跨节点 pub/sub 走 Kafka 广播，消费端先拿主题对本地订阅树做一次匹配，
+  没有本地订阅者的消息在反序列化之前就被丢弃；
+- 会话归属是一次 Redis 原子操作（读出旧 owner、写入本节点），
+  归属转移时定向通知旧节点释放连接，而不是仲裁或投票。
+
+代价是广播扇出占用约 20% CPU（见压测一节），换来的是免协调的水平扩展与高可用。
+设计细节见 [docs/cluster-broadcast-rationale.md](docs/cluster-broadcast-rationale.md)。
 
 ## 技术栈
 
@@ -77,10 +99,13 @@ curl -X POST http://127.0.0.1:8922/open/api/jmqtt/send \
 | 文档 | 内容 |
 |---|---|
 | [docs/configuration.md](docs/configuration.md) | 配置详解:集群/数据面/下行通道/Redis 持久化/背压/离线队列/ACL/TLS |
+| [docs/cluster-broadcast-rationale.md](docs/cluster-broadcast-rationale.md) | 集群为什么选广播而不是复制元数据 |
+| [docs/cluster-broadcast-assessment.md](docs/cluster-broadcast-assessment.md) | Kafka 差异化消费组做集群广播的方案评估 |
 | [docs/benchmark.md](docs/benchmark.md) | 压测方法、完整数据与容量结论 |
 | [docs/monitoring/](docs/monitoring/) | 监控配置:Prometheus 告警规则 + Grafana 面板 |
 | [docs/server-side-ingestion.md](docs/server-side-ingestion.md) | 平台侧为什么读 Kafka 而不是订阅 MQTT |
 | [docs/admin-console.md](docs/admin-console.md) | 管理台(jmqtt-admin)设计说明 |
+| [docs/reports/](docs/reports/) | 各能力的设计与实现报告(渐进记录) |
 | [passiolin/jmqtt-bench](https://github.com/passiolin/jmqtt-bench) | 压测工具(Go) |
 
 ## 压测：容量规格与结果

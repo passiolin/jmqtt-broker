@@ -2,9 +2,7 @@
 
 > 返回 [README](../README.md)
 
-完整配置样例见仓库 `src/main/resources/application.yml`,前缀 `jmqtt.broker`。
-工作目录(或其 `config/` 子目录)下放 `application-local.yml` 可覆盖仓库默认配置
-(外部文件优先级高于 jar 内配置;`spring.profiles.include: local` 已内置激活)。
+完整配置样例见仓库 `src/main/resources/application.yml`，前缀 `jmqtt.broker`。
 
 ## 配置
 
@@ -12,9 +10,6 @@
 即可覆盖仓库默认配置(外部文件优先级高于 jar 内配置；`spring.profiles.include: local`
 已内置激活)。该文件已加入 `.gitignore` —— 密码、内网地址、真实 topic 只写在里面,
 不会入库。注意:`mvn test` 会加载它,跑测试前可临时移开。
-
-
-完整配置见 `src/main/resources/application.yml`，前缀 `jmqtt.broker`。
 
 常用项：
 
@@ -337,18 +332,16 @@ jmqtt:subs:{clientId}      Hash  topicFilter -> qos
 | **不存消息** | 消息的归宿是 Kafka。放进 Redis 等于把投递路径接到中心化存储上 |
 
 Redis 不可用与恢复都会打日志，恢复后自动重新生效、无需重启 broker。
-broker 启动时<b>不会</b>连接 Redis —— Redis 挂掉不应该导致 broker 起不来。
+broker 启动时**不会**连接 Redis —— Redis 挂掉不应该导致 broker 起不来。
 
 **健康状态的语义**（`RedisConnectionManager`）：「只知道故障、不假定健康」。
 初始视为可用，失败后进入一段冷却期（长度取 `health-interval-ms`），冷却结束自动重试，
 任何一次成功立刻清除故障标记。
 
-由此得到一条调用约定：
+由此得到一条调用约定：`available()` 回答的是「现在值不值得尝试」，**不是**「Redis 是否一定可用」。
 
-| `available()` 回答的是「现在值不值得尝试」，**不是**「Redis 是否一定可用」 |
-|---|
-| 它只适合用在**可以安全跳过**的写路径上（跳过的代价只是这一次不落盘） |
-| **恢复 / 读取路径不做前置判断** —— 跳过一次恢复的代价是消息真的丢了，而直接尝试一次的代价只是一次命令超时（`command-timeout-ms` 兜底）。两个方向的代价不对称，判断就不该对称 |
+- 它只适合用在**可以安全跳过**的写路径上（跳过的代价只是这一次不落盘）
+- **恢复 / 读取路径不做前置判断** —— 跳过一次恢复的代价是消息真的丢了，而直接尝试一次的代价只是一次命令超时（`command-timeout-ms` 兜底）。两个方向的代价不对称，判断就不该对称
 
 在途消息（已发送未确认的 QoS 1/2）的持久镜像见 [在途消息持久化](#在途消息持久化)。
 
@@ -516,6 +509,13 @@ jmqtt:
 节点崩溃或发生跨节点接管时，这些「已经答应要投递给客户端」的消息就消失了 ——
 客户端重连后拿不到，**QoS 1/2 的保证在节点故障场景下破损**。
 
+**只有保留会话才写镜像。** 非空快照的写入以「会话是否保留」为前置 ——
+与会话持久化的「只有 `cleanSession=0` 落盘」是同一条策略。非保留会话
+（`cleanSession=1` / v5 Session Expiry=0）断开后既不重发在途、也没有离线积压，
+镜像永远读不回来，写它只是白费 Redis；判据同样是保留时长而非 cleanSession 位
+（v5 的 `cleanStart=1 且 SEI>0` 也写）。空快照（删除）不受此限 ——
+它是清理动作，调用时会话可能已被移走。
+
 **为什么是整份快照，而不是逐条操作日志。** 每个客户端的在途集合有硬上限
 （`max-inflight`，默认 32），所以「重写这一份」成本可控，换来两个关键好处：
 
@@ -539,7 +539,7 @@ jmqtt:
 | 方法 | 行为 | 用在哪 |
 |---|---|---|
 | `detach(clientId)` | **只清内存** | 跨节点接管 —— 镜像必须留给接管方节点加载 |
-| `removeByClient(clientId)` | 内存与镜像一起清 | 会话**真正销毁**（`cleanSession=1` 断开、会话过期） |
+| `removeByClient(clientId)` | 内存与镜像一起清（**同步**删 key 并撤回未刷盘的快照，删除不滞后一个刷盘周期） | 会话**真正销毁**（`cleanSession=1` 断开、`cleanStart=1` 重连清场、会话过期） |
 
 监控：`/open/api/jmqtt/info` 的 `inflight` 段。
 
