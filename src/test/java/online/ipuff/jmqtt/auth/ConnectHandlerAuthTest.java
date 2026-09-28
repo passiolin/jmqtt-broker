@@ -93,7 +93,7 @@ class ConnectHandlerAuthTest {
         ClusterBus clusterBus = new LocalClusterBus(props);
         BackpressureMetrics backpressureMetrics = new BackpressureMetrics();
         InflightPersistence inflightPersistence =
-                new InflightPersistence(props, emptyProvider(), Runnable::run);
+                new InflightPersistence(props, emptyProvider(), Runnable::run, sessionStoreService);
         AdminStatePublisher adminStatePublisher = new AdminStatePublisher(
                 new AdminProperties(false, 5000, 30, 200000, 5000, 16,
                         5000, 200, 50, 500, 60000, 3600),

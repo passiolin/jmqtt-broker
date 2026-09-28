@@ -99,8 +99,13 @@ public class DupPublishMessageStoreService implements IDupPublishMessageStoreSer
     @Override
     public void removeByClient(String clientId) {
         stores.remove(clientId);
-        // 会话真正销毁: 内存与镜像一起清
-        mirror(clientId);
+        // 会话真正销毁: 同步删镜像并撤回未刷盘的快照。
+        // 若走 onChanged 的异步空快照, 删除会滞后一个刷盘周期,
+        // 期间节点崩溃会留下孤儿 key
+        InflightPersistence target = mirrorTarget();
+        if (target != null) {
+            target.clear(clientId);
+        }
     }
 
     @Override
@@ -116,15 +121,16 @@ public class DupPublishMessageStoreService implements IDupPublishMessageStoreSer
      * 启用 Redis 时才存在, 且这样可以让本类与它之间不形成编译期的双向依赖。
      */
     private void mirror(String clientId) {
-        if (persistence == null) {
-            return;
-        }
-        InflightPersistence target = persistence.getIfAvailable();
+        InflightPersistence target = mirrorTarget();
         if (target == null) {
             return;
         }
         ConcurrentHashMap<Integer, DupPublishMessageStore> map = stores.get(clientId);
         target.onChanged(clientId, map == null ? List.of() : new ArrayList<>(map.values()));
+    }
+
+    private InflightPersistence mirrorTarget() {
+        return persistence == null ? null : persistence.getIfAvailable();
     }
 
     @Override

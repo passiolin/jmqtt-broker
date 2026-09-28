@@ -20,6 +20,8 @@ import io.lettuce.core.ScriptOutputType;
 import online.ipuff.jmqtt.config.BrokerProperties;
 import online.ipuff.jmqtt.message.DupPublishMessageStore;
 import online.ipuff.jmqtt.redis.RedisConnectionManager;
+import online.ipuff.jmqtt.session.ISessionStoreService;
+import online.ipuff.jmqtt.session.SessionStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -70,6 +72,14 @@ import java.util.concurrent.atomic.AtomicLong;
  * 若设备侧以 QoS 0 为主、只有下行指令用 QoS 1，同步写的开销可以忽略；
  * 若上行也用 QoS 1，就必须用 async 并接受那个窗口。
  * 占比可以从 {@code /open/api/jmqtt/info} 的 {@code qos} 段读出来。
+ *
+ * <h2>核心策略: 只有保留会话才写镜像</h2>
+ * 镜像存在的唯一目的是<b>重连时恢复</b>, 而非保留会话(v3.1.1 {@code cleanSession=1},
+ * v5 Session Expiry=0)断开后既不会重发在途、也不会有离线积压 ——
+ * 给它们写镜像永远不会被读回来, 白费 Redis 写入与刷盘槽位。
+ * 绝大多数 IoT 设备恰恰用的是 cleanSession=1, 这个判断与
+ * {@code SessionPersistence} 的「只有保留会话才落盘」是同一条策略。
+ * 判据见 {@link #onChanged}。
  *
  * <p><b>异步模式用单线程刷盘</b>：不是为了让 Redis 操作串行（Lettuce 本身是异步的），
  * 而是为了让「提交」有序 —— 同一客户端的两份快照不会因为线程调度而倒序落盘。
@@ -126,6 +136,8 @@ public class InflightPersistence {
     /** 未启用 Redis 时为 null —— 此时 {@link #mode()} 返回 {@link Mode#OFF} */
     private final RedisConnectionManager redis;
     private final Executor flushExecutor;
+    /** 判「该客户端的会话是否需要保留」用 —— 写镜像的前置过滤 */
+    private final ISessionStoreService sessions;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private final AtomicLong flushCount = new AtomicLong();
@@ -141,10 +153,12 @@ public class InflightPersistence {
      */
     public InflightPersistence(BrokerProperties properties,
                                ObjectProvider<RedisConnectionManager> redisProvider,
-                               @Qualifier("inflightFlushExecutor") Executor flushExecutor) {
+                               @Qualifier("inflightFlushExecutor") Executor flushExecutor,
+                               ISessionStoreService sessions) {
         this.properties = properties;
         this.redis = redisProvider.getIfAvailable();
         this.flushExecutor = flushExecutor;
+        this.sessions = sessions;
         BrokerProperties.RedisProperties redisProperties = properties.redis();
         if (this.redis == null) {
             log.info("在途消息持久化未启用: 未开启 Redis(redis.enabled=false), 节点故障时在途消息会丢失");
@@ -195,6 +209,14 @@ public class InflightPersistence {
      * <p>调用方传入的是<b>变化后的完整快照</b> —— 传 null 或空列表表示该客户端已无在途消息,
      * 镜像会被删除。
      *
+     * <p><b>非空快照只给保留会话写。</b>判据是 {@link SessionStore#isPersistent()}
+     * (保留时长 &gt; 0), 不是 cleanSession 位 —— v5 下 {@code cleanStart=1 && SEI>0}
+     * 的会话从零建立但断开后要保留, 也得写。这一过滤同时堵住一个规范偏差:
+     * cleanSession=1 的客户端在连接期间写的镜像, 会在节点崩溃后客户端改以
+     * {@code cleanSession=0} 重连时被误当作可恢复状态载入重发 —— 而规范要求
+     * 那个旧会话被整体丢弃。<b>空快照(删除)不受过滤</b>: 它是清理动作,
+     * 调用时会话可能已被移除(会话过期、cleanStart 重连清场), 不能依赖会话还在。
+     *
      * @param clientId 客户端
      * @param snapshot 变化后的完整在途集合
      */
@@ -202,7 +224,11 @@ public class InflightPersistence {
         if (!enabled() || clientId == null) {
             return;
         }
-        List<DupPublishMessageStore> copy = (snapshot == null || snapshot.isEmpty())
+        boolean deletion = snapshot == null || snapshot.isEmpty();
+        if (!deletion && !sessionRetained(clientId)) {
+            return;
+        }
+        List<DupPublishMessageStore> copy = deletion
                 ? List.of()
                 : List.copyOf(snapshot);
 
@@ -220,7 +246,23 @@ public class InflightPersistence {
     }
 
     /**
-     * 删除镜像。用于会话真正销毁（cleanSession=1 断开、会话过期）。
+     * 会话是否需要保留 —— 写镜像的前置判据。
+     *
+     * <p>会话不在表里(已过期被逐出、销毁流程先删了会话)视为不保留:
+     * 给一个已经不存在的会话写镜像, 只会在持久层留下幽灵数据。
+     */
+    private boolean sessionRetained(String clientId) {
+        SessionStore session = sessions.get(clientId);
+        return session != null && session.isPersistent();
+    }
+
+    /**
+     * 删除镜像。用于会话真正销毁 —— {@code cleanSession=1} 断开、
+     * {@code cleanStart=1} 重连清场、会话过期, 由
+     * {@code DupPublishMessageStoreService#removeByClient} 统一调用。
+     *
+     * <p>除删 Redis key 外还<b>撤回未刷盘的快照</b>: 若靠异步空快照去删,
+     * 删除会滞后一个刷盘周期, 期间节点崩溃会留下孤儿 key。
      *
      * <p><b>跨节点接管时不要调用</b> —— 会话此刻已归属新节点,
      * 镜像必须留给它加载。见 {@code IDupPublishMessageStoreService#detach}。

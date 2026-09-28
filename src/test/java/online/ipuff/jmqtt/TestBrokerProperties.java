@@ -37,11 +37,7 @@ public final class TestBrokerProperties {
 
     /** 指定认证配置的最小配置(认证挂起/HTTP 鉴权测试用) */
     public static BrokerProperties create(boolean authEnabled, String authUsername, String authPassword) {
-        return create("node-1", 32, 1000,
-                new BrokerProperties.KafkaProperties(
-                        false, "127.0.0.1:9092", "jmqtt", "jmqtt-cluster", null,
-                        true, List.of(),
-                        "", List.of(), false, 1000, 1000, 200, 1, "none", "latest", "topic", null, null, null),
+        return create("node-1", 32, 1000, defaultKafka(),
                 authEnabled, authUsername, authPassword);
     }
 
@@ -50,11 +46,8 @@ public final class TestBrokerProperties {
      * @param maxOfflineQueueLen 离线队列长度
      */
     public static BrokerProperties create(int maxInflight, int maxOfflineQueueLen) {
-        return create("node-1", maxInflight, maxOfflineQueueLen,
-                new BrokerProperties.KafkaProperties(
-                        false, "127.0.0.1:9092", "jmqtt", "jmqtt-cluster", null,
-                        true, List.of(),
-                        "", List.of(), false, 1000, 1000, 200, 1, "none", "latest", "topic", null, null, null));
+        return create("node-1", maxInflight, maxOfflineQueueLen, defaultKafka(),
+                false, "jmqtt", "jmqtt");
     }
 
     public static BrokerProperties create(String nodeId, int maxInflight, int maxOfflineQueueLen,
@@ -65,8 +58,35 @@ public final class TestBrokerProperties {
     public static BrokerProperties create(String nodeId, int maxInflight, int maxOfflineQueueLen,
                                           BrokerProperties.KafkaProperties kafka,
                                           boolean authEnabled, String authUsername, String authPassword) {
-        BrokerProperties.RedisProperties redis = new BrokerProperties.RedisProperties(
-                false, "127.0.0.1", 6379, null, 0, "jmqtt", 1000, 5000, "off", 100, 10000, "standalone", null, null);
+        return createBase(nodeId, maxInflight, maxOfflineQueueLen, kafka, authEnabled,
+                authUsername, authPassword,
+                new BrokerProperties.RedisProperties(
+                        false, "127.0.0.1", 6379, null, 0, "jmqtt", 1000, 5000,
+                        "off", 100, 10000, "standalone", null, null));
+    }
+
+    /**
+     * 指定在途镜像模式的配置({@code online.ipuff.jmqtt.store.InflightPersistence} 测试用)。
+     * {@code redis.enabled=true}, 但测试里连接管理器是替身, 不会真正建连。
+     */
+    public static BrokerProperties createWithInflightMode(String inflightMode) {
+        return createBase("node-1", 32, 1000, defaultKafka(), false, "jmqtt", "jmqtt",
+                new BrokerProperties.RedisProperties(
+                        true, "127.0.0.1", 6379, null, 0, "jmqtt", 1000, 5000,
+                        inflightMode, 100, 10000, "standalone", null, null));
+    }
+
+    private static BrokerProperties.KafkaProperties defaultKafka() {
+        return new BrokerProperties.KafkaProperties(
+                false, "127.0.0.1:9092", "jmqtt", "jmqtt-cluster", null,
+                true, List.of(),
+                "", List.of(), false, 1000, 1000, 200, 1, "none", "latest", "topic", null, null, null);
+    }
+
+    private static BrokerProperties createBase(String nodeId, int maxInflight, int maxOfflineQueueLen,
+                                               BrokerProperties.KafkaProperties kafka,
+                                               boolean authEnabled, String authUsername, String authPassword,
+                                               BrokerProperties.RedisProperties redis) {
         return new BrokerProperties(
                 nodeId, null, 1883, true, 8083, "/mqtt",
                 1, 2, false, 4096,
