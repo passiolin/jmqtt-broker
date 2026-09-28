@@ -78,6 +78,7 @@ curl -X POST http://127.0.0.1:8922/open/api/jmqtt/send \
 |---|---|
 | [docs/configuration.md](docs/configuration.md) | 配置详解:集群/数据面/下行通道/Redis 持久化/背压/离线队列/ACL/TLS |
 | [docs/benchmark.md](docs/benchmark.md) | 压测方法、完整数据与容量结论 |
+| [docs/monitoring/](docs/monitoring/) | 监控配置:Prometheus 告警规则 + Grafana 面板 |
 | [docs/server-side-ingestion.md](docs/server-side-ingestion.md) | 平台侧为什么读 Kafka 而不是订阅 MQTT |
 | [docs/admin-console.md](docs/admin-console.md) | 管理台(jmqtt-admin)设计说明 |
 | [passiolin/jmqtt-bench](https://github.com/passiolin/jmqtt-bench) | 压测工具(Go) |
