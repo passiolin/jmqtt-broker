@@ -57,7 +57,7 @@ application.yml 对基础设施配置内置了 `${ENV:默认}` 占位符 —— 
 | `JMQTT_CLUSTER_ENABLED` | 集群总开关 | false |
 | `JMQTT_KAFKA_ENABLED` | Kafka 总线开关 | false |
 | `JMQTT_KAFKA_BOOTSTRAP_SERVERS` | Kafka 地址 | 127.0.0.1:9092 |
-| `JMQTT_KAFKA_CONSUMER_THREADS` | 集群消费并行度 | 1 |
+| `JMQTT_KAFKA_CONSUMER_THREADS` | 集群消费并行度 | 0(= 2×CPU 核数) |
 | `JMQTT_REDIS_ENABLED` / `JMQTT_REDIS_HOST` / `JMQTT_REDIS_PORT` / `JMQTT_REDIS_PASSWORD` / `JMQTT_REDIS_DATABASE` | 会话持久化 Redis | false / 127.0.0.1 / 6379 / 空 / 0 |
 
 **自定义路径的配置文件**(docker 挂载场景, 文件名可自定义, 与 `JMQTT_*` 环境变量并存且优先级更高):

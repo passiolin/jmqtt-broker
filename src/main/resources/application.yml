@@ -160,7 +160,7 @@ jmqtt:
       # 同时是下行通道(downlink)worker 池的大小 —— 下行 key 为设备标识,
       # 同设备同分区同 worker, 设备内投递严格有序。
       # 有效上限 = topic 分区数
-      consumer-threads: 0
+      consumer-threads: ${JMQTT_KAFKA_CONSUMER_THREADS:0}
 
       # ---- 数据面: 上行出口 ----
       # 单路由形态(兼容保留)。配置了下方的 routes 时, 这三项被 routes 取代
