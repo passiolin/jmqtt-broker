@@ -15,17 +15,15 @@ WORKDIR /app
 COPY --chown=jmqtt:jmqtt app.jar /app/app.jar
 USER jmqtt
 
-# MQTT/TCP, MQTT/WebSocket, HTTP API(健康检查与管理接口)
+# MQTT/TCP, MQTT/WebSocket, HTTP API/Actuator
 EXPOSE 1883 8083 8922
 
 # 容器内存感知: 堆最多占容器内存的 75%; OOM 时直接退出, 交给重启策略拉起
 # (Spring Boot 2.7 + JDK 21 默认 MaxRAMPercentage=25%, 对 broker 偏保守)
 ENV JAVA_OPTS="-XX:MaxRAMPercentage=75.0 -XX:+ExitOnOutOfMemoryError"
 
-# MQTT 监听端口可建立 TCP 连接即视为健康。
-# 注意: 若运行时用 JMQTT_BROKER_PORT 改了端口, 这里要跟着改(compose 里覆盖 healthcheck)。
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD bash -c 'exec 3<>/dev/tcp/127.0.0.1/1883' || exit 1
+# 故意不内置 HEALTHCHECK: 探针端口写死, 与运行时可改的 JMQTT_PORT/SERVER_PORT
+# 一旦漂移就会永久误报 unhealthy; 健康判定交给 LB 对 1883 的 TCP 检查与 Prometheus。
 
 # sh -c 是为了运行时展开 $JAVA_OPTS
 ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]

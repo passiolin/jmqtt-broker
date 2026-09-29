@@ -32,4 +32,7 @@ services:
       # JMQTT_BROKER_HTTP_AUTH_ENABLED: "true"
       # JMQTT_BROKER_HTTP_AUTH_URL: "http://auth-center:8080/mqtt/auth"
     mem_limit: 1g
-    # healthcheck 已在镜像里定义(对 1883 建 TCP 连接), 无需重复声明
+    # 镜像不内置 healthcheck(健康判定交给 LB/监控);
+    # 旧镜像若仍带探针, 取消注释显式关闭:
+    # healthcheck:
+    #   disable: true

@@ -1,7 +1,8 @@
 # 容器部署
 
 镜像以 [azul/zulu-openjdk-debian:21](https://hub.docker.com/r/azul/zulu-openjdk-debian)(Zulu JDK 21,
-amd64/arm64)为父镜像,非 root 运行,内置容器内存感知与 MQTT 端口健康检查。
+amd64/arm64)为父镜像,非 root 运行,内置容器内存感知;不内置 Docker healthcheck,
+健康判定由 LB 的 TCP 检查与 Prometheus 监控承担。
 
 ## 构建
 
@@ -36,7 +37,7 @@ docker compose up -d
 |---|---|---|
 | 1883 | MQTT/TCP | 不直接暴露公网,由 LB 终结 TLS 后转发 |
 | 8083 | MQTT/WebSocket | 同上(LB 上做 WSS 443) |
-| 8922 | HTTP API / 健康检查 | 只绑本机或内网 |
+| 8922 | HTTP API / Actuator | 只绑本机或内网 |
 
 **TLS 在 LB 层终结**(见主 README「TLS / MQTTS」):镜像内只有明文端口,
 MQTTS(8883)/WSS(443) 的证书、轮换、限流统一在负载均衡层完成。
@@ -48,7 +49,7 @@ application.yml 对基础设施配置内置了 `${ENV:默认}` 占位符 —— 
 
 | 环境变量 | 对应配置 | 默认值 |
 |---|---|---|
-| `SERVER_PORT` | HTTP API / 健康检查端口 | 8922 |
+| `SERVER_PORT` | HTTP API / Actuator 端口 | 8922 |
 | `JMQTT_ID` | broker 标识(集群每节点不同) | jmqtt |
 | `JMQTT_HOST` | 监听地址(空 = 全网卡) | 空 |
 | `JMQTT_PORT` | MQTT/TCP 端口 | 1883 |
@@ -79,6 +80,8 @@ docker run -e JMQTT_KAFKA_ENABLED=true -e JMQTT_KAFKA_BOOTSTRAP_SERVERS=10.0.0.5
 
 ## 注意
 
-- **健康检查**写死了 1883;若用 `JMQTT_PORT` 改端口,需在 compose 里覆盖 `healthcheck`。
+- **健康检查**:镜像不内置 Docker healthcheck——探针端口写死,与运行时可改的
+  `JMQTT_PORT`/`SERVER_PORT` 漂移后会永久误报 unhealthy。旧镜像若仍带探针,可在
+  compose 里 `healthcheck: {disable: true}` 或 `docker run --no-healthcheck` 关闭。
 - **epoll**:镜像内可用(pom 已带 `netty-transport-native-epoll`,Linux 容器原生支持)。
 - **集群模式**:开 Kafka/Redis 前先读主 README 的集群章节,`JMQTT_BROKER_ID` 每节点必须不同。
