@@ -115,6 +115,7 @@ public class ConnectHandler {
     private final AdminStatePublisher adminStatePublisher;
     private final IInboundQos2Store inboundQos2Store;
     private final NodeMetricsService nodeMetricsService;
+    private final online.ipuff.jmqtt.session.SessionLifecycle sessionLifecycle;
 
     public ConnectHandler(BrokerProperties properties,
                           IAuthService authService,
@@ -130,7 +131,8 @@ public class ConnectHandler {
                           InflightPersistence inflightPersistence,
                           AdminStatePublisher adminStatePublisher,
                           IInboundQos2Store inboundQos2Store,
-                          NodeMetricsService nodeMetricsService) {
+                          NodeMetricsService nodeMetricsService,
+                          online.ipuff.jmqtt.session.SessionLifecycle sessionLifecycle) {
         this.properties = properties;
         this.authService = authService;
         this.sessionStoreService = sessionStoreService;
@@ -146,6 +148,7 @@ public class ConnectHandler {
         this.adminStatePublisher = adminStatePublisher;
         this.inboundQos2Store = inboundQos2Store;
         this.nodeMetricsService = nodeMetricsService;
+        this.sessionLifecycle = sessionLifecycle;
     }
 
     public void processConnect(Channel channel, MqttConnectMessage msg) {
@@ -300,7 +303,8 @@ public class ConnectHandler {
                         options.sessionExpirySeconds());
         session.setExpireSeconds(options.sessionExpirySeconds());
         session.setWillMessage(willMessage);
-        session.touch();
+        // 撤销过期判定: 连接在, 会话就不过期(过期时钟从断开起算)
+        session.markOpen();
         sessionStoreService.put(session);
 
         if (session.isPersistent()) {
@@ -340,6 +344,16 @@ public class ConnectHandler {
             previous.close();
         }
 
+        // 注册后复查会话归属: 从 put 会话到注册之间隔着一次 Redis 往返(acquireOwnership),
+        // 跨节点接管通知恰好落在这个窗口时, 会把刚恢复的会话与订阅当残留清掉。
+        // 不复查就注册上一条「活连接 + 零订阅」—— 客户端心跳正常却永远收不到消息。
+        if (sessionStoreService.get(clientId) != session) {
+            log.warn("clientId={} 的会话在注册间隙被接管清理, 断开本次连接让客户端重连", clientId);
+            connectionRegistry.unregister(clientId, channel);
+            channel.close();
+            return;
+        }
+
         // 8) CONNACK
         channel.writeAndFlush(ReplyFactory.connAck(version,
                 MqttConnectReturnCode.CONNECTION_ACCEPTED, sessionPresent,
@@ -361,8 +375,12 @@ public class ConnectHandler {
                 ChannelAttributes.peernameOf(channel),
                 properties.id()));
 
-        // 9) 需要保留的会话才做恢复投递: 在途重发 + 离线积压
-        if (session.isPersistent()) {
+        // 9) 恢复投递: 在途重发 + 离线积压。
+        //    门控是「服务端确实持有旧会话」而不是「会话是否持久」——
+        //    v5 的 Clean Start=0 省略 Session Expiry Interval(默认 0)时会话照旧要恢复,
+        //    SEI 只决定连接关闭后会话活多久([MQTT-3.1.2-4])。
+        //    用 isPersistent() 门控会让这类客户端拿到 sessionPresent=true 却什么都收不到。
+        if (sessionPresent) {
             loadInflightFromMirror(clientId);
             resendInflightMessages(channel, clientId);
 
@@ -479,14 +497,10 @@ public class ConnectHandler {
      * 清除会话及其全部附属状态, 包含持久层。
      */
     private void clearSessionState(String clientId) {
-        sessionStoreService.remove(clientId);
-        subscribeStoreService.removeForClient(clientId);
-        dupPublishMessageStoreService.removeByClient(clientId);
-        dupPubRelMessageStoreService.removeByClient(clientId);
-        // 会话重建时接收方向的 QoS 2 状态同样作废: 客户端拿到的是 sessionPresent=false,
-        // 它不会(也不该)继续上一次未完成的 PUBREL 流程
-        inboundQos2Store.clearClient(clientId);
-        sessionPersistence.sessionDestroyed(clientId);
+        // 级联清单只有一个来源(SessionLifecycle.destroy) ——
+        // 各处自写清单就是各种泄漏的温床。force: cleanStart 是客户端明确要求
+        // 丢弃既有会话, 持久层记录无条件删除
+        sessionLifecycle.destroy(clientId, true);
     }
 
     /**
@@ -545,12 +559,21 @@ public class ConnectHandler {
 
     /**
      * 重连后重发未确认的 PUBLISH(dup=1)与 PUBREL(dup=1)。
+     *
+     * <p>重发的 PUBLISH 必须<b>占发送窗口</b>(登记进 {@link SendBuffer} 的在途账本):
+     * 它们就是未确认的 QoS 1/2, 不占窗口就会与随后的新消息一起突破客户端的
+     * Receive Maximum; 不登记则确认到达时窗口无从释放。
+     * PUBREL 不占窗口 —— 它闭环的是 PUBREL 流程, 见 {@code PubRecHandler}。
      */
     private void resendInflightMessages(Channel channel, String clientId) {
+        SendBuffer buffer = channel.attr(ChannelAttributes.SEND_BUFFER).get();
         List<DupPublishMessageStore> publishes = dupPublishMessageStoreService.get(clientId);
         for (DupPublishMessageStore stored : publishes) {
             channel.write(ReplyFactory.publish(channel, stored.topic(), stored.qos(),
                     stored.messageId(), stored.payload(), false, true));
+            if (buffer != null) {
+                buffer.confirm(stored.messageId());
+            }
         }
         List<DupPubRelMessageStore> pubRels = dupPubRelMessageStoreService.get(clientId);
         for (DupPubRelMessageStore stored : pubRels) {

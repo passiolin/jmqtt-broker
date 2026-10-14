@@ -31,7 +31,8 @@ import java.nio.charset.StandardCharsets;
  *   <li><b>key = MQTT 主题。</b>这是唯一正确的选择:
  *       <ul>
  *         <li>Kafka 默认分区器对 key 取 hash → 同一主题恒定落到同一 partition,
- *             从而维持该主题的顺序。若 key 为空, 默认是 sticky 分区,
+ *             消费端按分区内 FIFO 看到有序(producer 重试仍可能乱序, 跨节点尽力有序)。
+ *             若 key 为空, 默认是 sticky 分区,
  *             同一主题的消息会散落不同 partition, 消费端看到的就是乱序。</li>
  *         <li>主题本身也就随消息传递过去了, 无需在 value 里再编码一遍。</li>
  *       </ul>

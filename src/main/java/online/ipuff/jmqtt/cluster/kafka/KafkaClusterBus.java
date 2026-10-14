@@ -78,8 +78,9 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <h2>消费并行度(consumer-threads)</h2>
  * poller 只做 poll / 分派 / 提交; 记录按<b>分区</b>哈希到固定 worker 并行处理。
- * 顺序不受影响: 广播 record 的 key 恒为 MQTT 主题, 同主题必落同分区,
- * 同分区固定同一个 worker 串行处理。位点提交只领先于「已连续完成」的部分
+ * 顺序保证是<b>分区内有序</b>: 广播 record 的 key 恒为 MQTT 主题, 同主题必落同分区,
+ * 同分区固定同一个 worker 串行处理; 但 producer 重试可能把重试批次排到后续批次之后,
+ * 跨节点只承诺尽力有序, 不承诺同主题严格有序。位点提交只领先于「已连续完成」的部分
  * ({@link PartitionProgressTracker}), 至少一次语义与串行时代等价。
  *
  * <h2>数据面: 上行出口</h2>
@@ -398,6 +399,9 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
     /** 单个消费 worker 的待处理队列容量: 队列满时 poller 阻塞(背压), 而不是丢弃 */
     private static final int WORKER_QUEUE_CAPACITY = 1000;
 
+    /** 消费循环异常后重建 consumer 的退避时长 */
+    private static final long RESTART_BACKOFF_MS = 5_000;
+
     @Override
     public void start() {
         if (running) {
@@ -418,21 +422,7 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
 
         // 分区被撤销时: 先把已完成部分同步提交, 再丢弃该分区的位点状态
         this.tracker = new PartitionProgressTracker();
-        this.consumer.subscribe(List.of(kafka.clusterTopic()), new ConsumerRebalanceListener() {
-            @Override
-            public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
-                commitProgress(true);
-                tracker.clear(partitions);
-                if (!partitions.isEmpty()) {
-                    log.info("分区被撤销, 已提交完成位点并重置跟踪: {}", partitions);
-                }
-            }
-
-            @Override
-            public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
-                // 位点由已提交 offset / auto-offset-reset 决定, 无需处理
-            }
-        });
+        subscribeClusterTopic(this.consumer);
         this.running = true;
 
         this.senderThread = new Thread(this::sendLoop, "jmqtt-kafka-sender");
@@ -457,6 +447,12 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
                 kafka.clusterTopic(), kafka.resolvedGroupId(brokerId), workerCount,
                 kafka.uplinkEnabled() ? kafka.uplinkTopic() : "(未启用)",
                 kafka.uplinkExclusive());
+        if ("jmqtt".equals(brokerId)) {
+            // 默认 id 是集群里最隐蔽的坑: 所有节点同 id ⇒ 同消费组(广播退化为分摊),
+            // 且收端跳过"自己"的消息时会把每个节点的消息都当自己的丢掉 —— 集群全哑
+            log.warn("broker.id 仍是默认值 [jmqtt]: 集群部署必须每节点一个唯一 id(配置 JMQTT_ID), "
+                    + "否则跨节点投递静默失效");
+        }
         log.info("注意: groupId 每个节点必须不同, 相同会退化为组内分摊而非广播。当前={}",
                 kafka.resolvedGroupId(brokerId));
     }
@@ -545,44 +541,146 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
     // 消费线程
     // ------------------------------------------------------------------
 
+    /** 订阅集群主题并挂上分区撤销回调(启动与重建共用同一段逻辑)。 */
+    private void subscribeClusterTopic(KafkaConsumer<String, byte[]> c) {
+        c.subscribe(List.of(properties.kafka().clusterTopic()), new ConsumerRebalanceListener() {
+            @Override
+            public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
+                commitProgress(true);
+                PartitionProgressTracker progress = tracker;
+                if (progress != null) {
+                    progress.clear(partitions);
+                }
+                if (!partitions.isEmpty()) {
+                    log.info("分区被撤销, 已提交完成位点并重置跟踪: {}", partitions);
+                }
+            }
+
+            @Override
+            public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
+                // 位点由已提交 offset / auto-offset-reset 决定, 无需处理
+            }
+        });
+    }
+
     /**
      * 消费线程(poller): 只做三件事 —— poll、按分区分派、提交位点。
      * 记录的处理全在 worker 上, poller 永不执行业务逻辑。
+     *
+     * <p><b>线程不许死。</b>任何异常只中断「这一轮消费」: 退避后重建 consumer 继续。
+     * 旧实现 catch 一下就退出线程, 而节点对外服务一切正常 —— 集群消息面静默停摆,
+     * 只有一行 ERROR 提示, 直到进程重启才恢复。消费循环必须自我修复。
      */
     private void consumeLoop() {
+        try {
+            while (running) {
+                try {
+                    consumeLoopOnce();
+                    return; // running=false 的正常退出
+                } catch (WakeupException e) {
+                    if (!running) {
+                        return;
+                    }
+                    // 意外唤醒: consumer 本身没坏, 继续用
+                    log.warn("Kafka 消费线程被意外唤醒, 继续消费", e);
+                } catch (Throwable t) {
+                    if (!running) {
+                        return;
+                    }
+                    log.error("Kafka 消费循环异常, {}ms 后重建 consumer 重试(本地投递不受影响)",
+                            RESTART_BACKOFF_MS, t);
+                }
+                // 走到这里 = 异常退出: KafkaConsumer 出错后不可复用, 换新的再战
+                restartConsumer();
+            }
+        } finally {
+            // 停止顺序: 先排干 worker(在途消息处理完) → 同步提交最后一批位点 → 关客户端。
+            // 都在本线程执行 —— KafkaConsumer 只允许被所属线程访问。
+            drainWorkers();
+            commitProgressQuietly();
+            closeConsumerQuietly();
+        }
+    }
+
+    /** 一轮消费: poll → 分派 → 提交, 直到 {@code running=false}。 */
+    private void consumeLoopOnce() {
         KafkaConsumer<String, byte[]> c = consumer;
         if (c == null) {
             return;
         }
         Duration pollTimeout = Duration.ofMillis(properties.kafka().pollTimeoutMs());
-        try {
-            while (running) {
-                ConsumerRecords<String, byte[]> records = c.poll(pollTimeout);
-                if (!records.isEmpty()) {
-                    dispatch(records);
-                    // 异步提交已完成位点; 失败无害 —— 下一次 drain 会带上更大的位点重试
-                    commitProgress(false);
+        while (running) {
+            ConsumerRecords<String, byte[]> records = c.poll(pollTimeout);
+            if (!records.isEmpty()) {
+                dispatch(records);
+                // 异步提交已完成位点; 失败无害 —— 下一次 drain 会带上更大的位点重试
+                commitProgress(false);
+            }
+        }
+    }
+
+    /**
+     * 异常后重建 consumer: 关旧 → 退避 → 建新 → 重新订阅。
+     * 位点状态一并重置, 从上次提交处重新拉 —— 至少一次语义下最多重复, 不会跳过。
+     */
+    private void restartConsumer() {
+        closeConsumerQuietly();
+        while (running) {
+            try {
+                this.tracker = new PartitionProgressTracker();
+                KafkaConsumer<String, byte[]> fresh =
+                        new KafkaConsumer<>(consumerConfig(properties.kafka(), properties.id()));
+                subscribeClusterTopic(fresh);
+                this.consumer = fresh;
+                log.info("Kafka consumer 已重建, 集群消息面恢复");
+                return;
+            } catch (Exception e) {
+                log.error("Kafka consumer 重建失败, {}ms 后重试", RESTART_BACKOFF_MS, e);
+                if (!sleepQuietly(RESTART_BACKOFF_MS)) {
+                    return;
                 }
             }
-        } catch (WakeupException e) {
-            if (running) {
-                log.warn("Kafka 消费线程被意外唤醒", e);
+        }
+    }
+
+    /** 只关消息面 consumer(producer/下行不动)。只允许在消费线程调用。 */
+    private void closeConsumerQuietly() {
+        KafkaConsumer<String, byte[]> c = consumer;
+        consumer = null;
+        if (c != null) {
+            try {
+                c.close(Duration.ofSeconds(3));
+            } catch (Exception e) {
+                log.debug("关闭 consumer 异常", e);
             }
-        } catch (Exception e) {
-            log.error("Kafka 消费线程异常退出, 集群消息将不再被接收", e);
-        } finally {
-            // 停止顺序: 先排干 worker(在途消息处理完) → 同步提交最后一批位点 → 关客户端。
-            // 都在本线程执行 —— KafkaConsumer 只允许被所属线程访问。
-            drainWorkers();
+        }
+    }
+
+    /** 退避等待; 被打断或收到停止信号返回 false。 */
+    private static boolean sleepQuietly(long millis) {
+        try {
+            Thread.sleep(millis);
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    /** 停止序列里的最后提交: 失败只记日志, 不能挡住 consumer 关闭。 */
+    private void commitProgressQuietly() {
+        try {
             commitProgress(true);
-            closeQuietly();
+        } catch (Exception e) {
+            log.debug("停止时位点提交失败(忽略)", e);
         }
     }
 
     /**
      * 按分区分派到固定 worker。广播 record 的 key 恒为 MQTT 主题,
-     * 同主题必落同分区 ⇒ 同分区的 FIFO 队列就是同主题的顺序 ——
-     * 这就是「并行只发生在不同分区之间、同主题严格有序」的保证。
+     * 同主题必落同分区 ⇒ 同分区的 FIFO 队列就是同主题的顺序。
+     * 但顺序保证只有「分区内有序」—— producer 重试可能乱序,
+     * 跨节点是尽力有序, 不承诺同主题严格有序。
      */
     private void dispatch(ConsumerRecords<String, byte[]> records) {
         Worker[] pool = workers;
@@ -849,25 +947,25 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
      * 绝不经过出站路径 —— 后台从上行拿到消息再下发, 不会绕回 Kafka。
      */
     private void downlinkLoop() {
-        KafkaConsumer<String, byte[]> c = downlinkConsumer;
-        if (c == null) {
-            return;
-        }
-        Duration pollTimeout = Duration.ofMillis(properties.kafka().pollTimeoutMs());
         try {
             while (running) {
-                ConsumerRecords<String, byte[]> records = c.poll(pollTimeout);
-                if (!records.isEmpty()) {
-                    dispatchDownlink(records);
-                    commitDownlinkProgress(false);
+                try {
+                    downlinkLoopOnce();
+                    return; // running=false 的正常退出
+                } catch (WakeupException e) {
+                    if (!running) {
+                        return;
+                    }
+                    log.warn("下行消费线程被意外唤醒, 继续消费", e);
+                } catch (Throwable t) {
+                    if (!running) {
+                        return;
+                    }
+                    log.error("下行消费循环异常, {}ms 后重建 consumer 重试(本地投递不受影响)",
+                            RESTART_BACKOFF_MS, t);
                 }
+                restartDownlinkConsumer();
             }
-        } catch (WakeupException e) {
-            if (running) {
-                log.warn("下行消费线程被意外唤醒", e);
-            }
-        } catch (Exception e) {
-            log.error("下行消费线程异常退出, 后台下发消息将不再被接收", e);
         } finally {
             // 停止顺序与消息面一致: 先排干 worker(在途处理完) → 同步提交最后一批位点;
             // 消费者由 closeQuietly 统一关闭
@@ -876,6 +974,83 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
                 commitDownlinkProgress(true);
             } catch (Exception e) {
                 log.debug("停止时下行位点提交失败(忽略)", e);
+            }
+        }
+    }
+
+    /** 一轮下行消费: poll → 分派 → 提交, 直到 {@code running=false}。 */
+    private void downlinkLoopOnce() {
+        KafkaConsumer<String, byte[]> c = downlinkConsumer;
+        if (c == null) {
+            return;
+        }
+        Duration pollTimeout = Duration.ofMillis(properties.kafka().pollTimeoutMs());
+        while (running) {
+            ConsumerRecords<String, byte[]> records = c.poll(pollTimeout);
+            if (!records.isEmpty()) {
+                dispatchDownlink(records);
+                commitDownlinkProgress(false);
+            }
+        }
+    }
+
+    /** 异常后重建下行 consumer: 关旧 → 退避 → 建新 → 重新订阅。 */
+    private void restartDownlinkConsumer() {
+        closeDownlinkConsumerQuietly();
+        while (running) {
+            try {
+                this.downlinkTracker = new PartitionProgressTracker();
+                KafkaConsumer<String, byte[]> fresh = newDownlinkConsumer();
+                this.downlinkConsumer = fresh;
+                log.info("下行 consumer 已重建, 后台下发恢复");
+                return;
+            } catch (Exception e) {
+                log.error("下行 consumer 重建失败, {}ms 后重试", RESTART_BACKOFF_MS, e);
+                if (!sleepQuietly(RESTART_BACKOFF_MS)) {
+                    return;
+                }
+            }
+        }
+    }
+
+    /** 建新的下行 consumer 并订阅全部下行主题。 */
+    private KafkaConsumer<String, byte[]> newDownlinkConsumer() {
+        BrokerProperties.KafkaProperties kafka = properties.kafka();
+        Map<String, Object> cfg = consumerConfig(kafka, properties.id());
+        cfg.put(ConsumerConfig.GROUP_ID_CONFIG, kafka.resolvedGroupId(properties.id()) + "-downlink");
+        cfg.put(ConsumerConfig.CLIENT_ID_CONFIG, prefix(kafka) + "-" + properties.id() + "-downlink");
+        KafkaConsumer<String, byte[]> c = new KafkaConsumer<>(cfg);
+        java.util.List<String> topics = new java.util.ArrayList<>();
+        for (BrokerProperties.KafkaProperties.Downlink downlink : downlinksOf(kafka)) {
+            topics.add(downlink.topic());
+        }
+        c.subscribe(topics, new ConsumerRebalanceListener() {
+            @Override
+            public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
+                commitDownlinkProgress(true);
+                PartitionProgressTracker tracker = downlinkTracker;
+                if (tracker != null) {
+                    tracker.clear(partitions);
+                }
+            }
+
+            @Override
+            public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
+                // 位点由已提交 offset / auto-offset-reset 决定, 无需处理
+            }
+        });
+        return c;
+    }
+
+    /** 只关下行 consumer。只允许在下行线程调用。 */
+    private void closeDownlinkConsumerQuietly() {
+        KafkaConsumer<String, byte[]> d = downlinkConsumer;
+        downlinkConsumer = null;
+        if (d != null) {
+            try {
+                d.close(Duration.ofSeconds(3));
+            } catch (Exception e) {
+                log.debug("关闭下行 consumer 异常", e);
             }
         }
     }

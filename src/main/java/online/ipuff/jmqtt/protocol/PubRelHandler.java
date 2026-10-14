@@ -46,6 +46,10 @@ public class PubRelHandler {
 
     public void processPubRel(Channel channel, MqttMessageIdVariableHeader variableHeader) {
         String clientId = channel.attr(ChannelAttributes.CLIENT_ID).get();
+        if (clientId == null) {
+            channel.close();
+            return;
+        }
         int messageId = variableHeader.messageId();
         inboundQos2Store.release(clientId, messageId);
         channel.writeAndFlush(ReplyFactory.pubComp(channel, messageId, ReplyFactory.SUCCESS));

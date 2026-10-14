@@ -348,7 +348,10 @@ public class InflightPersistence {
 
     private void persist(String clientId, List<DupPublishMessageStore> snapshot) {
         List<String> args = new ArrayList<>(1 + snapshot.size() * 2);
-        args.add(Long.toString(sessionExpireSeconds(clientId)));
+        // 派生 key 的统一 TTL 上限(RedisProperties#keyTtlSeconds):
+        // 不按会话 expire 逐次续期 —— 那样镜像会比会话活得更久, 死会话的在途
+        // 消息被下一次同 clientId 的会话恢复并重发
+        args.add(Long.toString(properties.redis().keyTtlSeconds()));
         for (DupPublishMessageStore message : snapshot) {
             String json = encode(message);
             if (json != null) {
@@ -374,21 +377,9 @@ public class InflightPersistence {
     }
 
     /**
-     * 镜像的存活期跟会话一致 —— 会话过期了, 欠它的在途消息也没有意义了。
+     * 镜像的存活期由派生 key 的统一 TTL 上限兜底(见 {@code RedisProperties#keyTtlSeconds})。
+     * 会话销毁时的即时删除是主清理机制, TTL 只兜崩溃残留。
      */
-    private long sessionExpireSeconds(String clientId) {
-        String value = redis.execute("inflight.readExpire",
-                () -> redis.commands().hget(sessionKey(clientId), "expire"), null);
-        if (value == null) {
-            return properties.sessionExpirySeconds();
-        }
-        try {
-            return Long.parseLong(value);
-        } catch (NumberFormatException e) {
-            return properties.sessionExpirySeconds();
-        }
-    }
-
     private String inflightKey(String clientId) {
         // hash tag 让 inflight 与 session 落在同一 slot, Lua 才能同时操作两者
         return properties.redis().keyPrefix() + KEY_SEGMENT_INFLIGHT + "{" + clientId + "}";

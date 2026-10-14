@@ -64,6 +64,10 @@ public class RedisPendingMessageStore implements IPendingMessageStore {
      * 入队 + 限长 + 续期。返回本次丢弃条数。
      *
      * <p>超限时丢最旧的: IoT 场景下「最近的数据」通常比「最早的数据」更有价值。
+     *
+     * <p>TTL 用派生 key 的统一上限({@code key-ttl-seconds}), 不再读会话 expire ——
+     * 每次写都按会话 expire 续期会让队列比会话活得更久, 死会话的积压被下一次
+     * 同 clientId 的会话捞走。
      */
     private static final String ENQUEUE_SCRIPT =
             "redis.call('RPUSH', KEYS[1], ARGV[1]) "
@@ -74,21 +78,19 @@ public class RedisPendingMessageStore implements IPendingMessageStore {
                     + "  redis.call('LTRIM', KEYS[1], len - max, -1) "
                     + "  dropped = len - max "
                     + "end "
-                    + "local expire = redis.call('HGET', KEYS[2], 'expire') "
-                    + "if expire then "
-                    + "  local ttl = tonumber(expire) "
-                    + "  if ttl and ttl > 0 then redis.call('EXPIRE', KEYS[1], ttl) end "
-                    + "end "
+                    + "local ttl = tonumber(ARGV[3]) "
+                    + "if ttl and ttl > 0 then redis.call('EXPIRE', KEYS[1], ttl) end "
                     + "return dropped";
 
     /**
      * 批量入队脚本: 一次 EVAL 携带同一客户端的多条消息(RPUSH 循环) → 超限 LTRIM
-     * → 按会话 expire 续期。IO 次数从「每消息一次往返」降为「每客户端每轮一次」。
+     * → 续 TTL。IO 次数从「每消息一次往返」降为「每客户端每轮一次」。
      */
     private static final String ENQUEUE_BATCH_SCRIPT =
             "local max = tonumber(ARGV[1]) "
+                    + "local ttl = tonumber(ARGV[2]) "
                     + "local dropped = 0 "
-                    + "for i = 2, #ARGV do "
+                    + "for i = 3, #ARGV do "
                     + "  redis.call('RPUSH', KEYS[1], ARGV[i]) "
                     + "end "
                     + "local len = redis.call('LLEN', KEYS[1]) "
@@ -96,11 +98,7 @@ public class RedisPendingMessageStore implements IPendingMessageStore {
                     + "  redis.call('LTRIM', KEYS[1], len - max, -1) "
                     + "  dropped = len - max "
                     + "end "
-                    + "local expire = redis.call('HGET', KEYS[2], 'expire') "
-                    + "if expire then "
-                    + "  local ttl = tonumber(expire) "
-                    + "  if ttl and ttl > 0 then redis.call('EXPIRE', KEYS[1], ttl) end "
-                    + "end "
+                    + "if ttl and ttl > 0 then redis.call('EXPIRE', KEYS[1], ttl) end "
                     + "return dropped";
 
     /** 取出并移除前 limit 条。两条命令必须原子, 否则并发取队列会拿到重复消息。 */
@@ -151,9 +149,10 @@ public class RedisPendingMessageStore implements IPendingMessageStore {
         Long dropped = redis.execute("queue.enqueue", () -> redis.commands().eval(
                 ENQUEUE_SCRIPT,
                 ScriptOutputType.INTEGER,
-                new String[]{queueKey(clientId), sessionKey(clientId)},
+                new String[]{queueKey(clientId)},
                 payload,
-                Integer.toString(maxLen)), null);
+                Integer.toString(maxLen),
+                Integer.toString(properties.redis().keyTtlSeconds())), null);
         if (dropped == null) {
             // Redis 不可用: 消息没能入队。这比「入队后丢失」更糟, 必须让调用方知道
             redis.execute("queue.enqueueCounter", () -> {
@@ -187,22 +186,34 @@ public class RedisPendingMessageStore implements IPendingMessageStore {
             droppedCount.addAndGet(messages.size());
             return messages.size();
         }
-        String[] argv = new String[messages.size() + 1];
-        argv[0] = Integer.toString(maxLen);
-        for (int i = 0; i < messages.size(); i++) {
-            String payload = encode(messages.get(i));
+        List<String> argv = new ArrayList<>(messages.size() + 2);
+        argv.add(Integer.toString(maxLen));
+        argv.add(Integer.toString(properties.redis().keyTtlSeconds()));
+        for (PendingMessage message : messages) {
+            String payload = encode(message);
             if (payload == null) {
-                argv[i + 1] = "";
-            } else {
-                argv[i + 1] = payload;
+                // 序列化失败的消息不能塞空串进队列 —— 那会在投递时变成一条空消息
+                droppedCount.incrementAndGet();
+                continue;
             }
+            argv.add(payload);
+        }
+        if (argv.size() <= 2) {
+            return 0;
         }
         Long dropped = redis.execute("queue.enqueueBatch", () -> redis.commands().eval(
                 ENQUEUE_BATCH_SCRIPT,
                 ScriptOutputType.INTEGER,
-                new String[]{queueKey(clientId), sessionKey(clientId)},
-                argv), Long.valueOf(0));
-        int d = dropped == null ? 0 : dropped.intValue();
+                new String[]{queueKey(clientId)},
+                argv.toArray(new String[0])), null);
+        if (dropped == null) {
+            // Redis 不可用: 这批消息没能入队, 必须计数 —— 静默丢弃会把
+            // 「QoS 1/2 离线积压丢失」变成一个看不见的洞
+            droppedCount.addAndGet(messages.size());
+            log.warn("Redis 不可用, 离线消息批量入队失败: clientId={} 条数={}", clientId, messages.size());
+            return messages.size();
+        }
+        int d = dropped.intValue();
         if (d > 0) {
             droppedCount.addAndGet(d);
         }
@@ -253,10 +264,6 @@ public class RedisPendingMessageStore implements IPendingMessageStore {
 
     private String queueKey(String clientId) {
         return properties.redis().keyPrefix() + KEY_SEGMENT_QUEUE + "{" + clientId + "}";
-    }
-
-    private String sessionKey(String clientId) {
-        return properties.redis().keyPrefix() + KEY_SEGMENT_SESSION + "{" + clientId + "}";
     }
 
     private String encode(PendingMessage message) {

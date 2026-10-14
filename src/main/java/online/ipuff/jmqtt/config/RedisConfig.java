@@ -50,6 +50,9 @@ public class RedisConfig {
 
     private static final Logger log = LoggerFactory.getLogger(RedisConfig.class);
 
+    /** 建连超时: 快速失败, 不让黑洞网络把 CONNECT 处理线程拖上秒级 */
+    private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(2);
+
     @Bean(destroyMethod = "close")
     public RedisConnectionSource redisConnectionSource(BrokerProperties properties) {
         BrokerProperties.RedisProperties redis = properties.redis();
@@ -58,6 +61,21 @@ public class RedisConfig {
         io.lettuce.core.AbstractRedisClient client = createClient(redis);
         // 命令超时必须设小: 这些命令都在连接建立路径上, Redis 卡住会直接拖慢握手
         client.setDefaultTimeout(Duration.ofMillis(redis.commandTimeoutMs()));
+        // 建连超时同样必须显式设小: setDefaultTimeout 管不到 connect() ——
+        // 对黑洞网络(安全组丢包)的建连默认要卡 ~10s, 而建连发生在 CONNECT 处理路径上
+        if (client instanceof io.lettuce.core.RedisClient standalone) {
+            standalone.setOptions(io.lettuce.core.ClientOptions.builder()
+                    .socketOptions(io.lettuce.core.SocketOptions.builder()
+                            .connectTimeout(CONNECT_TIMEOUT)
+                            .build())
+                    .build());
+        } else if (client instanceof io.lettuce.core.cluster.RedisClusterClient cluster) {
+            cluster.setOptions(io.lettuce.core.cluster.ClusterClientOptions.builder()
+                    .socketOptions(io.lettuce.core.SocketOptions.builder()
+                            .connectTimeout(CONNECT_TIMEOUT)
+                            .build())
+                    .build());
+        }
         log.info("Redis 客户端已创建(惰性连接): mode={} {}",
                 modeOf(redis), describeTargets(redis));
         return new RedisConnectionSource(client);

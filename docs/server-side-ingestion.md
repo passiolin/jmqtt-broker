@@ -181,7 +181,7 @@ headers  = jmqtt-kind = routed-publish
   需要无损传输二进制的场景应直接订阅 MQTT，而不是走数据面
 - **`clientid` 就是设备标识**，下游做设备维度聚合、分组、去重时直接用它；
   `username` 缺失时省略该字段，`node` 是接入节点标识（brokerId）
-- 同 key（`uplink-key: device` 时即同设备）分区内严格有序
+- 同 key（`uplink-key: device` 时即同设备）落同一分区, 分区内有序(producer 重试可能乱序, 尽力有序)
 
 > 多路由上行（`routes`：每条路由一组过滤器 + 目标 topic + 分区键，一条消息命中多条就各发一份）
 > 是同一契约的多目标形态，详见 [configuration.md](configuration.md) 的数据面一节。

@@ -15,7 +15,8 @@ package online.ipuff.jmqtt.store;
 
 import org.springframework.stereotype.Service;
 
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.IntPredicate;
 
 /**
  * 报文标识符生成器的进程内实现。
@@ -25,22 +26,41 @@ import java.util.concurrent.atomic.AtomicInteger;
  * (MQTT 3.1.1 §2.3.1): 它标识的是「这条连接上的一次投递」, 跨实例共享没有意义,
  * 反而给每条 QoS 1/2 投递增加一次网络往返, 并让共享存储成为投递路径上的依赖。
  *
- * <p>这里用进程内 {@link AtomicInteger}, 取值范围 1..65535。
+ * <p><b>为什么不能是一个全局计数器</b>: 全局绕回 65535 次后, 某个慢客户端
+ * (仍有未确认消息)会再次拿到同一个标识符 —— 在途镜像按标识符覆盖, 旧消息从
+ * 恢复副本里消失, 客户端还会收到两条同标识符的不同消息。计数器按会话隔离后,
+ * 绕回时跳过本会话在用的标识符(见 {@link #nextMessageId})就不可能撞。
+ *
+ * <p>跨节点接管后计数器不迁移: 新节点从在途镜像加载的消息带着各自的标识符,
+ * 分配时的 {@code inUse} 判定会把它们跳过 —— 镜像就是在途集合的真源,
+ * 比「把计数值也存一份」更准也更省。
  */
 @Service
 public class MessageIdService implements IMessageIdService {
 
     private static final int MAX_MESSAGE_ID = 65535;
 
-    private final AtomicInteger counter = new AtomicInteger(0);
+    /** clientId -> 上次分配的标识符(单元素数组, 供同步块内自增) */
+    private final ConcurrentHashMap<String, int[]> lastIds = new ConcurrentHashMap<>();
 
     @Override
-    public int nextMessageId() {
-        while (true) {
-            int next = counter.updateAndGet(v -> v >= MAX_MESSAGE_ID ? 1 : v + 1);
-            if (next > 0) {
-                return next;
+    public int nextMessageId(String clientId, IntPredicate inUse) {
+        int[] state = lastIds.computeIfAbsent(clientId, k -> new int[]{0});
+        synchronized (state) {
+            int candidate = state[0];
+            for (int i = 0; i < MAX_MESSAGE_ID; i++) {
+                candidate = candidate >= MAX_MESSAGE_ID ? 1 : candidate + 1;
+                if (!inUse.test(candidate)) {
+                    state[0] = candidate;
+                    return candidate;
+                }
             }
         }
+        throw new IllegalStateException("会话 " + clientId + " 的报文标识符已耗尽(在途消息过多)");
+    }
+
+    @Override
+    public void release(String clientId) {
+        lastIds.remove(clientId);
     }
 }

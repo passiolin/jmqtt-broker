@@ -33,7 +33,9 @@ public interface ISessionStoreService {
     void put(SessionStore session);
 
     /**
-     * 获取会话, 不存在或已过期返回 {@code null}。
+     * 获取会话, 不存在返回 {@code null}。
+     *
+     * <p>纯读: 已过期但尚未回收的会话也会返回, 回收是 {@link #drainExpired} 的事。
      */
     SessionStore get(String clientId);
 

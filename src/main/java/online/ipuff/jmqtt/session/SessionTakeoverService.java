@@ -57,6 +57,7 @@ public class SessionTakeoverService implements TakeoverListener {
     private final IDupPublishMessageStoreService dupPublishMessageStoreService;
     private final IDupPubRelMessageStoreService dupPubRelMessageStoreService;
     private final IPendingMessageStore pendingMessageStore;
+    private final online.ipuff.jmqtt.store.OfflineEnqueueBuffer offlineEnqueueBuffer;
     private final online.ipuff.jmqtt.metrics.NodeMetricsService nodeMetricsService;
 
     public SessionTakeoverService(ConnectionRegistry connectionRegistry,
@@ -66,6 +67,7 @@ public class SessionTakeoverService implements TakeoverListener {
                                   IDupPublishMessageStoreService dupPublishMessageStoreService,
                                   IDupPubRelMessageStoreService dupPubRelMessageStoreService,
                                   IPendingMessageStore pendingMessageStore,
+                                  online.ipuff.jmqtt.store.OfflineEnqueueBuffer offlineEnqueueBuffer,
                                   online.ipuff.jmqtt.metrics.NodeMetricsService nodeMetricsService) {
         this.connectionRegistry = connectionRegistry;
         this.sessionStoreService = sessionStoreService;
@@ -74,6 +76,7 @@ public class SessionTakeoverService implements TakeoverListener {
         this.dupPublishMessageStoreService = dupPublishMessageStoreService;
         this.dupPubRelMessageStoreService = dupPubRelMessageStoreService;
         this.pendingMessageStore = pendingMessageStore;
+        this.offlineEnqueueBuffer = offlineEnqueueBuffer;
         this.nodeMetricsService = nodeMetricsService;
     }
 
@@ -85,9 +88,18 @@ public class SessionTakeoverService implements TakeoverListener {
             // (保留至过期是 MQTT 语义)。此时会话归属已迁往接管方节点 ——
             // 若不清理本地副本, 本节点会在最长一个会话过期周期内继续为它
             // 入队离线消息, 与接管方节点双写。清理本地副本, 停止入队。
-            if (sessionStoreService.get(clientId) == null) {
+            SessionStore session = sessionStoreService.get(clientId);
+            if (session == null) {
                 // 本地既无连接也无会话: 接管消息重复到达, 忽略即可
                 log.debug("收到接管通知但本节点未持有该连接与会话, 忽略: clientId={} 接管方={}",
+                        clientId, fromNodeId);
+                return;
+            }
+            if (session.isOnline()) {
+                // 会话刚在本节点上线(CONNECT 处理中, 连接尚未注册): 这是客户端
+                // 又弹回了本节点, 通知是滞后的 —— 此时清本地副本等于把刚恢复的
+                // 会话与订阅清成「活连接 + 零订阅」。交给 CONNECT 的注册后复查兜底。
+                log.info("收到接管通知但本节点会话刚上线(注册间隙), 忽略: clientId={} 接管方={}",
                         clientId, fromNodeId);
                 return;
             }
@@ -119,7 +131,11 @@ public class SessionTakeoverService implements TakeoverListener {
         // 5) 离线积压队列
         //    持久队列<b>不动</b> —— 它已随会话归属新节点, 删掉等于销毁新节点该投递的消息。
         //    非持久队列是本节点私有的, 客户端已迁走, 留在本节点也永远投不出去。
-        if (!pendingMessageStore.persistent()) {
+        //    未刷盘的缓冲尾部同理: 持久模式下刷进存储(新节点从存储取), 否则丢弃。
+        if (pendingMessageStore.persistent()) {
+            offlineEnqueueBuffer.flushClient(clientId);
+        } else {
+            offlineEnqueueBuffer.discard(clientId);
             int pending = pendingMessageStore.size(clientId);
             if (pending > 0) {
                 log.warn("接管清理丢弃 {} 条离线积压消息(队列非持久, 无法随会话转移): clientId={}",

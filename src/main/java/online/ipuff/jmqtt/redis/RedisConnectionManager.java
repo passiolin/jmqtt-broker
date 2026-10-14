@@ -135,9 +135,13 @@ public class RedisConnectionManager {
 
     /**
      * 定期探活。既负责发现故障, 也负责发现恢复 —— 恢复后自动重新生效, 无需重启。
+     *
+     * <p>探活前先清故障标记: 建连尝试由探活线程承担, 冷却期内的业务调用一律快速失败
+     * (见 {@link #connection()}), 若探活也受冷却限制就永远没人重建连接了。
      */
     @Scheduled(fixedDelayString = "${jmqtt.broker.redis.health-interval-ms:5000}")
     public void healthCheck() {
+        downUntilMillis = 0L;
         execute("ping", () -> commands().ping(), null);
     }
 
@@ -145,18 +149,36 @@ public class RedisConnectionManager {
      * 惰性建立连接。失败时抛异常, 由调用方的 execute 包装成降级。
      * 单机/哨兵/集群的差异全部在 {@link RedisConnectionSource} 里,
      * 这里只看到统一的「连接 + 命令视图」。
+     *
+     * <p><b>冷却期内快速失败</b>: 已知故障且没有可用连接时, 不再为每次调用做一次
+     * 建连尝试 —— 建连虽有 2s 超时兜底, 但 CONNECT 处理就在调用链上, 重连风暴下
+     * 每条连接都去等这 2s 会拖死 event loop。冷却期内由健康探活线程负责重建连接,
+     * 业务调用直接降级(恢复/读取路径的语义与「这一次真失败了」完全一致)。
      */
     private RedisConnectionSource.Handle connection() {
         RedisConnectionSource.Handle current = connection;
         if (current != null && current.connection().isOpen()) {
             return current;
         }
+        if (!available()) {
+            throw new IllegalStateException("Redis 处于已知故障冷却期, 跳过建连尝试(由健康探活负责重建)");
+        }
         synchronized (this) {
             if (connection != null && connection.connection().isOpen()) {
                 return connection;
             }
-            connection = connectionSource.open();
-            return connection;
+            RedisConnectionSource.Handle fresh = connectionSource.open();
+            RedisConnectionSource.Handle old = connection;
+            connection = fresh;
+            if (old != null && old != fresh) {
+                // 换下来的旧句柄必须显式关掉 —— 半开状态下留着就是一条泄漏的 TCP
+                try {
+                    old.connection().close();
+                } catch (Exception e) {
+                    log.debug("关闭旧 Redis 连接异常(忽略)", e);
+                }
+            }
+            return fresh;
         }
     }
 }

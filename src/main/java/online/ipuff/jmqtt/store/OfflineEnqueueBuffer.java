@@ -16,6 +16,8 @@ package online.ipuff.jmqtt.store;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
 import online.ipuff.jmqtt.config.BrokerProperties;
 import org.springframework.stereotype.Component;
 
@@ -27,7 +29,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 离线入队的异步缓冲: 投递线程只做内存追加, 后台单线程批量刷入存储。
+ * 离线入队的异步缓冲: 投递线程只做内存追加, 后台定时批量刷入存储。
  *
  * <h2>为什么需要它</h2>
  * 离线入队发生在<b>下行投递线程</b>上(设备不在线的回显/指令都要缓存)。
@@ -38,11 +40,15 @@ import java.util.concurrent.atomic.AtomicLong;
  * <h2>语义与边界</h2>
  * <ul>
  *   <li>每客户端 FIFO 有界(同 max-offline-queue-len), 超限丢最旧并计数</li>
- *   <li>全局缓冲总量有界({@code maxBuffered}), 超限丢最新并计数 —— 内存不失控</li>
- *   <li>后台线程批量刷入(每客户端一次 EVAL 携带全部积压消息), Redis IO 次数
+ *   <li>全局缓冲总量有界({@code max-offline-buffered}), 超限丢最新并计数 —— 内存不失控</li>
+ *   <li>后台定时批量刷入(每客户端一次 EVAL 携带全部积压消息), Redis IO 次数
  *       从「每消息一次」降为「每客户端每轮一次」</li>
  *   <li>崩溃丢失窗口 = 未刷盘的缓冲尾部; 对离线缓存语义可接受(在线投递零影响)</li>
  * </ul>
+ *
+ * <p><b>刷盘必须是定时任务</b>: 曾经 {@code flushTick} 只有定义没有调用,
+ * 缓冲成了只进不出的黑洞 —— 离线消息永远到不了存储, 节点重启或客户端换节点
+ * 重连就整个积压消失。缓冲只是暂存, 存储才是离线队列的真源。
  */
 @Component
 public class OfflineEnqueueBuffer {
@@ -54,8 +60,8 @@ public class OfflineEnqueueBuffer {
     private final int maxBuffered;
     private final boolean synchronous;
 
-    /** 全局缓冲上限(条): 超限丢最新, 内存不失控。 */
-    public static final int DEFAULT_MAX_BUFFERED = 100_000;
+    /** 全局缓冲默认上限(条): 超限丢最新, 内存不失控。 */
+    public static final int DEFAULT_MAX_BUFFERED = 20_000;
 
     private final Object lock = new Object();
     /** clientId -> FIFO(保序) */
@@ -64,8 +70,10 @@ public class OfflineEnqueueBuffer {
     private final AtomicLong droppedBuffered = new AtomicLong();
 
     @Autowired
-    public OfflineEnqueueBuffer(IPendingMessageStore store, BrokerProperties properties) {
-        this(store, properties.maxOfflineQueueLen(), DEFAULT_MAX_BUFFERED, false);
+    public OfflineEnqueueBuffer(IPendingMessageStore store, BrokerProperties properties,
+                                @Value("${jmqtt.broker.max-offline-buffered:" + DEFAULT_MAX_BUFFERED + "}")
+                                int maxBuffered) {
+        this(store, properties.maxOfflineQueueLen(), maxBuffered, false);
     }
 
     /** 测试与降级用: 同步直写模式。 */
@@ -84,17 +92,18 @@ public class OfflineEnqueueBuffer {
         }
         boolean overflow = false;
         synchronized (lock) {
-            ArrayDeque<PendingMessage> dq = buffered.computeIfAbsent(clientId, k -> new ArrayDeque<>());
-            // 每客户端有界: 同存储口径, 超限丢最旧
-            while (dq.size() >= maxLen) {
-                dq.pollFirst();
-                droppedBuffered.incrementAndGet();
-            }
-            if (bufferedCount.get() < maxBuffered) {
+            if (bufferedCount.get() >= maxBuffered) {
+                overflow = true;
+            } else {
+                ArrayDeque<PendingMessage> dq = buffered.computeIfAbsent(clientId, k -> new ArrayDeque<>());
+                // 每客户端有界: 同存储口径, 超限丢最旧
+                while (dq.size() >= maxLen) {
+                    dq.pollFirst();
+                    bufferedCount.decrementAndGet();
+                    droppedBuffered.incrementAndGet();
+                }
                 dq.offerLast(message);
                 bufferedCount.incrementAndGet();
-            } else {
-                overflow = true;
             }
         }
         if (overflow) {
@@ -111,8 +120,14 @@ public class OfflineEnqueueBuffer {
             ArrayDeque<PendingMessage> dq = buffered.computeIfAbsent(clientId, k -> new ArrayDeque<>());
             for (int i = messages.size() - 1; i >= 0; i--) {
                 dq.offerFirst(messages.get(i));
+                bufferedCount.incrementAndGet();
             }
-            bufferedCount.addAndGet(messages.size());
+            // 回填同样受每客户端上限约束, 只是丢最旧(即刚回填的尾部之外的历史消息)
+            while (dq.size() > maxLen) {
+                dq.pollLast();
+                bufferedCount.decrementAndGet();
+                droppedBuffered.incrementAndGet();
+            }
         }
     }
 
@@ -128,8 +143,48 @@ public class OfflineEnqueueBuffer {
         }
     }
 
-    /** 后台刷盘线程: 每 tick 把缓冲整体批量落存储。 */
+    /**
+     * 会话销毁时丢弃该客户端的缓冲消息。
+     *
+     * <p>必须与存储侧的 {@code removeAll} 成对出现: 缓冲里的消息比存储里的新,
+     * 只清存储会把缓冲尾巴留给下一个同 clientId 的会话。
+     */
+    public void discard(String clientId) {
+        synchronized (lock) {
+            ArrayDeque<PendingMessage> dq = buffered.remove(clientId);
+            if (dq != null && !dq.isEmpty()) {
+                bufferedCount.addAndGet(-dq.size());
+                droppedBuffered.addAndGet(dq.size());
+            }
+        }
+    }
+
+    /**
+     * 跨节点接管时把该客户端的缓冲消息<b>刷入存储</b>而不是丢弃 ——
+     * 会话已归新节点, 它从存储里取这份积压。缓冲是本节点私有的, 不刷就随节点消失了。
+     */
+    public void flushClient(String clientId) {
+        List<PendingMessage> batch;
+        synchronized (lock) {
+            ArrayDeque<PendingMessage> dq = buffered.remove(clientId);
+            if (dq == null || dq.isEmpty()) {
+                return;
+            }
+            bufferedCount.addAndGet(-dq.size());
+            batch = new ArrayList<>(dq);
+        }
+        long dropped = store.enqueueBatch(clientId, batch, maxLen);
+        if (dropped > 0) {
+            log.warn("接管刷盘丢弃 {} 条离线消息(超限): clientId={}", dropped, clientId);
+        }
+    }
+
+    /** 后台刷盘: 每 tick 把缓冲整体批量落存储。 */
+    @Scheduled(fixedDelayString = "${jmqtt.broker.offline-flush-interval-ms:200}")
     public void flushTick() {
+        if (synchronous) {
+            return;
+        }
         Map<String, List<PendingMessage>> batch;
         synchronized (lock) {
             if (buffered.isEmpty()) {

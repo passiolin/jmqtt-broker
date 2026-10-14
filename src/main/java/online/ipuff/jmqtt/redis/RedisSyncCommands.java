@@ -36,6 +36,10 @@ public interface RedisSyncCommands {
 
     String ping();
 
+    String get(String key);
+
+    Long incr(String key);
+
     Long del(String... keys);
 
     Boolean expire(String key, long seconds);

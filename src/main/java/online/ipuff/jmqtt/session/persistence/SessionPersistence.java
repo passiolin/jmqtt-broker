@@ -135,9 +135,23 @@ public class SessionPersistence {
     // ------------------------------------------------------------------
 
     /**
-     * 会话销毁时清除持久化数据(客户端以 cleanSession=1 重连, 或断开时声明 clean)。
+     * 会话销毁时清除持久化数据。<b>带归属校验</b>: 记录归属其他节点时不动它。
+     *
+     * @return 是否确认「该会话的持久数据归本节点处置」(已删除或本无记录)。
+     *         false 表示归属已迁走, 调用方对共享持久数据(队列/镜像)也必须停手
      */
-    public void sessionDestroyed(String clientId) {
+    public boolean sessionDestroyed(String clientId) {
+        if (!repository.available()) {
+            // 持久层不可用: 没有共享数据需要保护, 本地清理照常
+            return true;
+        }
+        return repository.removeIfOwner(clientId);
+    }
+
+    /**
+     * 客户端明确要求丢弃既有会话(cleanStart)时的无条件删除。
+     */
+    public void sessionDiscarded(String clientId) {
         if (!repository.available()) {
             return;
         }

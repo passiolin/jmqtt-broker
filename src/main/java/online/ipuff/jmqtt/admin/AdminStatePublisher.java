@@ -279,13 +279,20 @@ public class AdminStatePublisher {
         }
         String key = keys.clients(nodeId);
         manager.execute("admin.clientRegistry", () -> {
+            // 按 clientId 合并批次, 只保留每客户端的<b>最后一条</b>状态。
+            // 否则「先全删、后全增」会把批内 connect+disconnect 的顺序颠倒 ——
+            // 同批 [上线 A, 下线 A] 会执行成「删 A, 再写 A」, 幽灵客户端永远留在控制台
+            Map<String, String> lastOp = new LinkedHashMap<>();
+            for (ClientOp op : batch) {
+                lastOp.put(op.clientId(), op.json());
+            }
             Map<String, String> puts = new LinkedHashMap<>();
             List<String> dels = new ArrayList<>();
-            for (ClientOp op : batch) {
-                if (op.json() == null) {
-                    dels.add(op.clientId());
+            for (Map.Entry<String, String> entry : lastOp.entrySet()) {
+                if (entry.getValue() == null) {
+                    dels.add(entry.getKey());
                 } else {
-                    puts.put(op.clientId(), op.json());
+                    puts.put(entry.getKey(), entry.getValue());
                 }
             }
             if (!dels.isEmpty()) {

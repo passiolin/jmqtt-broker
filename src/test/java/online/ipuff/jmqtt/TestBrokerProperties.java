@@ -61,7 +61,7 @@ public final class TestBrokerProperties {
         return createBase(nodeId, maxInflight, maxOfflineQueueLen, kafka, authEnabled,
                 authUsername, authPassword,
                 new BrokerProperties.RedisProperties(
-                        false, "127.0.0.1", 6379, null, 0, "jmqtt", 1000, 5000,
+                        false, "127.0.0.1", 6379, null, 0, "jmqtt", 604800, 1000, 5000,
                         "off", 100, 10000, "standalone", null, null));
     }
 
@@ -72,7 +72,7 @@ public final class TestBrokerProperties {
     public static BrokerProperties createWithInflightMode(String inflightMode) {
         return createBase("node-1", 32, 1000, defaultKafka(), false, "jmqtt", "jmqtt",
                 new BrokerProperties.RedisProperties(
-                        true, "127.0.0.1", 6379, null, 0, "jmqtt", 1000, 5000,
+                        true, "127.0.0.1", 6379, null, 0, "jmqtt", 604800, 1000, 5000,
                         inflightMode, 100, 10000, "standalone", null, null));
     }
 

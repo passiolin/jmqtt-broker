@@ -72,7 +72,18 @@ public interface ISessionRepository {
     void removeSubscriptions(String clientId);
 
     /**
-     * 删除会话及其全部附属数据。
+     * 删除会话及其全部附属数据(无条件)。
+     *
+     * <p>仅用于客户端明确要求丢弃既有会话(cleanStart)的场景。
      */
     void remove(String clientId);
+
+    /**
+     * 归属校验删除: 仅当会话记录归属本节点(或已不存在)时删除, 返回是否删除。
+     *
+     * <p>过期回收/异常断连的销毁必须走这里 —— 本节点的陈旧副本过期时,
+     * 无条件删除会把别的节点正在服务的会话记录一并删掉。
+     * 校验与删除必须原子(实现方用 Lua), 且拿不到归属时一律不删。
+     */
+    boolean removeIfOwner(String clientId);
 }

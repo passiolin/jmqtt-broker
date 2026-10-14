@@ -79,4 +79,10 @@ public class NoopSessionRepository implements ISessionRepository {
     public void remove(String clientId) {
         // 不持久化
     }
+
+    @Override
+    public boolean removeIfOwner(String clientId) {
+        // 不持久化: 没有共享状态需要保护, 视作「归属本节点」
+        return true;
+    }
 }

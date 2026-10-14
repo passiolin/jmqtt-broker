@@ -16,7 +16,9 @@
 ```yaml
 jmqtt:
   broker:
-    id: jmqtt                    # Broker 标识
+    id: jmqtt                    # Broker 标识。★ 集群部署必须每节点唯一: 同 id 会让
+                                 # 所有节点落进同一消费组(广播退化为分摊), 并把其他节点的
+                                 # 消息当自己的丢掉 —— 跨节点投递静默失效
     port: 1883                   # MQTT/TCP 端口
     websocket-enabled: true
     websocket-port: 8083
@@ -144,10 +146,11 @@ jmqtt:
 | 出站走有界队列, 满则丢弃 | 位于 MQTT 发布路径上, 绝不能被 Kafka 故障阻塞 |
 | `max-block-ms` 必须设小 | 默认 60s 会直接卡住发布路径 |
 
-**消费并行度**（`consumer-threads`，默认 1）：poller 线程只做 poll / 分派 / 提交，
-记录按**分区**哈希到固定 worker 并行处理。顺序不受影响 —— 上面「key = 主题 ⇒
+**消费并行度**（`consumer-threads`，默认 0 = 2×CPU 核数）：poller 线程只做 poll / 分派 / 提交，
+记录按**分区**哈希到固定 worker 并行处理。顺序保证是「**分区内有序**」—— 上面「key = 主题 ⇒
 同主题必落同分区」保证了同分区（即同主题）固定由同一个 worker 串行处理，
-并行只发生在不同分区之间。位点提交只领先于「已连续完成」的部分，至少一次语义
+但 producer 重试可能把重试批次排到后续批次之后，**跨节点只承诺尽力有序，
+不承诺同主题严格有序**。位点提交只领先于「已连续完成」的部分，至少一次语义
 与串行消费等价；worker 队列满时背压 poller 而不是丢消息。有效上限 = topic 分区数。
 
 ### 数据面（上行出口）：服务端接入的正规路径
@@ -276,6 +279,10 @@ jmqtt:
       port: 6379
       database: 0
       key-prefix: jmqtt
+      # 派生 key(订阅/离线队列/在途镜像)的统一 TTL(秒)。会话销毁时即时删除是主清理,
+      # 该 TTL 只兜崩溃残留; 会话保留时长超过它时要相应调大。
+      # 保留消息(retained)按 MQTT 语义不设 TTL, 不受影响
+      key-ttl-seconds: 604800
       command-timeout-ms: 1000   # 这些命令都在握手路径上, 必须设小
       health-interval-ms: 5000
 
@@ -402,6 +409,10 @@ jmqtt:
     # 每个持久会话最多缓存多少条离线消息, 超出丢弃最旧的
     # 0 表示不缓存(对 cleanSession=0 的客户端离线即丢, 即 QoS 1/2 语义上的破损)
     max-offline-queue-len: 1000
+    # 离线入队异步缓冲的全局上限(条), 超出丢弃最新的
+    max-offline-buffered: 20000
+    # 缓冲批量刷进队列存储的间隔(毫秒)。缓冲只是暂存, 存储才是离线队列的真源
+    offline-flush-interval-ms: 200
 ```
 
 **它补的是哪个洞**：MQTT 规范里，对 `cleanSession=0` 的客户端，服务端在它离线期间

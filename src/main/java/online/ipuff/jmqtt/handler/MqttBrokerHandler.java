@@ -45,6 +45,7 @@ import online.ipuff.jmqtt.cluster.InternalSendServer;
 import online.ipuff.jmqtt.message.RetainMessageStore;
 import online.ipuff.jmqtt.message.WillMessage;
 import online.ipuff.jmqtt.protocol.ProtocolProcessor;
+import online.ipuff.jmqtt.protocol.ReplyFactory;
 import online.ipuff.jmqtt.session.ConnectionRegistry;
 import online.ipuff.jmqtt.util.Payloads;
 import online.ipuff.jmqtt.session.ISessionStoreService;
@@ -85,6 +86,7 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
     private final online.ipuff.jmqtt.authz.IAclService aclService;
     private final online.ipuff.jmqtt.cluster.ClusterBus clusterBus;
     private final online.ipuff.jmqtt.metrics.NodeMetricsService nodeMetricsService;
+    private final online.ipuff.jmqtt.session.SessionLifecycle sessionLifecycle;
 
     public MqttBrokerHandler(ProtocolProcessor protocolProcessor,
                              ConnectionRegistry connectionRegistry,
@@ -95,7 +97,8 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
                              AdminStatePublisher adminStatePublisher,
                              online.ipuff.jmqtt.authz.IAclService aclService,
                              online.ipuff.jmqtt.cluster.ClusterBus clusterBus,
-                             online.ipuff.jmqtt.metrics.NodeMetricsService nodeMetricsService) {
+                             online.ipuff.jmqtt.metrics.NodeMetricsService nodeMetricsService,
+                             online.ipuff.jmqtt.session.SessionLifecycle sessionLifecycle) {
         this.protocolProcessor = protocolProcessor;
         this.connectionRegistry = connectionRegistry;
         this.sessionStoreService = sessionStoreService;
@@ -106,6 +109,7 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
         this.aclService = aclService;
         this.clusterBus = clusterBus;
         this.nodeMetricsService = nodeMetricsService;
+        this.sessionLifecycle = sessionLifecycle;
     }
 
     @Override
@@ -129,6 +133,19 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
         // 只有 DEBUG 级才构造描述字符串(preview 截断, 见 Payloads)
         if (log.isDebugEnabled()) {
             log.debug("{}", describeInbound(channel, msg));
+        }
+
+        // 首包必须是 CONNECT。此前没有 clientId、没有会话、更没有认证 ——
+        // 放行其他报文等于开了一条绕过认证的消息注入通道
+        // (裸 TCP 直接发 PUBLISH 就能把消息灌进路由、集群总线与保留存储)。
+        if (channel.attr(ChannelAttributes.CONNECT_SEEN).get() == null) {
+            if (msg.fixedHeader().messageType() != MqttMessageType.CONNECT) {
+                log.warn("首包不是 CONNECT, 按协议错误断开: type={} remote={}",
+                        msg.fixedHeader().messageType(), channel.remoteAddress());
+                ReplyFactory.closeWithReason(channel, ReplyFactory.PROTOCOL_ERROR);
+                return;
+            }
+            channel.attr(ChannelAttributes.CONNECT_SEEN).set(Boolean.TRUE);
         }
 
         // CONNECT 认证挂起中(HTTP 鉴权等外部响应): 忽略一切后续报文。
@@ -276,7 +293,17 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
             }
             // ACL 决策缓存随连接释放(无论是否被接管 —— 新连接有自己的缓存条目)
             aclService.onClientOffline(clientId);
-            publishWillIfNeeded(channel, clientId);
+            if (removed) {
+                // 遗嘱与会话去留只在「这条连接是该 clientId 的当前注册连接」时处理:
+                // 被接管的旧连接关闭不代表客户端死了(它已在新连接上活着),
+                // 发遗嘱是错的; 同节点接管时更会误把<em>新</em>连接的 will 当场发掉并清空,
+                // 真正掉线时反而无遗嘱可发。会话此刻归新连接所有, 旧连接也不许碰。
+                publishWillIfNeeded(channel, clientId);
+                // 会话去留收口: 优雅断开已由 DisconnectHandler 处理过, 这里只管异常断连
+                if (!Boolean.TRUE.equals(channel.attr(ChannelAttributes.GRACEFUL_DISCONNECT).get())) {
+                    sessionLifecycle.connectionClosed(clientId);
+                }
+            }
         }
 
         if (log.isDebugEnabled()) {

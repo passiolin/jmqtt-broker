@@ -18,6 +18,7 @@ import online.ipuff.jmqtt.router.MqttTopic;
 import online.ipuff.jmqtt.router.TopicTrie;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -36,8 +37,14 @@ import java.util.Map;
  *
  * <p>注意: 这与订阅路由的 {@link TopicTrie#matchTopic} 是<b>相反方向</b>的遍历,
  * 不能复用同一个方法 —— 把过滤器当成主题去走主题驱动的匹配, 是这里最容易犯的错。
+ *
+ * <p>仅在<b>未启用 Redis</b>时装配; 启用后由 {@code RedisRetainMessageStore} 接管 ——
+ * 保留消息是数据而非路由状态, 跨节点可见(设备发到节点 A、应用在节点 B 订阅)与
+ * 重启不丢都要求它离开纯内存。
  */
 @Service
+@ConditionalOnProperty(prefix = "jmqtt.broker.redis", name = "enabled",
+        havingValue = "false", matchIfMissing = true)
 public class RetainMessageStoreService implements IRetainMessageStoreService {
 
     private static final Logger log = LoggerFactory.getLogger(RetainMessageStoreService.class);

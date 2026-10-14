@@ -173,13 +173,15 @@ public class InternalSendServer {
                 delivered++;
             }
         }
-        for (PendingMessage message : stillBuffered) {
+        for (int i = 0; i < stillBuffered.size(); i++) {
             SendBuffer buffer = channel.attr(ChannelAttributes.SEND_BUFFER).get();
             if (buffer != null && !buffer.hasWindow()) {
-                // 窗口满: 剩余滞留消息放回缓冲头部(保序), 随后台刷盘落存储等下次重连
-                offlineEnqueueBuffer.requeueFront(clientId, List.of(message));
-                continue;
+                // 窗口满: 剩余滞留消息<b>整段</b>放回缓冲头部等下次投递。
+                // 逐条 requeueFront 是逐个前插, 顺序会整个倒过来
+                offlineEnqueueBuffer.requeueFront(clientId, stillBuffered.subList(i, stillBuffered.size()));
+                break;
             }
+            PendingMessage message = stillBuffered.get(i);
             deliver(channel, clientId, message.topic(), message.payload(),
                     message.qos(), message.retain(), false);
             delivered++;
@@ -266,7 +268,9 @@ public class InternalSendServer {
      */
     private void sendNew(Channel channel, SendBuffer buffer, String clientId,
                          String topic, byte[] payload, int qos, boolean retain, boolean dup) {
-        int packetId = messageIdService.nextMessageId();
+        // 标识符按会话分配并跳过在途占用值 —— 在途镜像就是「在用集合」的真源
+        int packetId = messageIdService.nextMessageId(clientId,
+                id -> dupPublishMessageStoreService.contains(clientId, id));
         dupPublishMessageStoreService.put(
                 new DupPublishMessageStore(clientId, topic, qos, packetId, payload));
         try {
@@ -291,6 +295,17 @@ public class InternalSendServer {
         channel.writeAndFlush(
                 ReplyFactory.publish(channel, topic, qos, packetId, payload, retain, dup),
                 channel.voidPromise());
+    }
+
+    /**
+     * 投递一条「因订阅触发的保留消息」。
+     *
+     * <p>与普通投递同一条路径 —— 同样占发送窗口、分配并登记报文标识符。
+     * 直接 {@code channel.write} 的旧写法会绕过窗口, 一次订阅命中大量保留消息时
+     * 突破客户端的 Receive Maximum, 且标识符不进在途账本, 确认与重发无从对账。
+     */
+    public void deliverRetained(Channel channel, String clientId, String topic, byte[] payload, int qos) {
+        deliver(channel, clientId, topic, payload, qos, true, false);
     }
 
     /**

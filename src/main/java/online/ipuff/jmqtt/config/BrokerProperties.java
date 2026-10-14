@@ -167,8 +167,9 @@ public record BrokerProperties(
      * @param queueCapacity    出站队列容量。队列满时丢弃并计数 ——
      *                         宁可丢跨节点消息, 也不能阻塞本节点投递
      * @param consumerThreads  集群消费并行度(worker 数)。记录按<b>分区</b>哈希到固定
-     *                         worker —— 由于广播 record 的 key 恒为 MQTT 主题(同主题必落
-     *                         同分区), 同主题的消息仍严格有序, 并行只发生在不同分区之间。
+     *                         worker —— 广播 record 的 key 恒为 MQTT 主题(同主题必落
+     *                         同分区), 顺序保证是「<b>分区内有序</b>」: 同分区 FIFO,
+     *                         但 producer 重试可能乱序, 跨节点只承诺尽力有序。
      *                         缺省 0(= 2 × CPU 核数); 消费跟不上时调大,
      *                         有效上限是 topic 的分区数。
      *                         <b>同时是下行通道(downlink)worker 池的大小</b> ——
@@ -178,7 +179,7 @@ public record BrokerProperties(
      * @param autoOffsetReset  无已提交 offset 时的起点, latest 或 earliest
      * @param connectionEventTopic 连接事件(上线/下线)发布的专用 topic。
      *                         留空(默认)关闭; 非空时 record 的 key=clientId
-     *                         (同一客户端的事件严格有序), value 为 JSON。
+     *                         (同一客户端的事件落同一分区, 分区内有序), value 为 JSON。
      *                         供后台系统消费设备生命周期, 不参与集群消息面
      * @param routes           多路由上行: 每条路由一组过滤器 + 目标 topic + 分区键,
      *                         一条消息命中多条路由就各发一份。配置了 routes 时
@@ -343,6 +344,15 @@ public record BrokerProperties(
             String password,
             @Min(0) int database,
             String keyPrefix,
+            /**
+             * 派生 key(订阅 / 离线队列 / 在途镜像)的统一 TTL(秒)。
+             *
+             * <p>broker 是消息中转不是存储, 派生 key 只需要一个「最多留多久」的上限,
+             * 不必逐条追会话的真实生命周期(那要每次写入都读会话 TTL, 徒增往返且两边
+             * 很容易漂移)。会话销毁时的即时删除是主清理机制, 这个 TTL 只兜崩溃残留。
+             * 会话保留时长超过本值的部署应相应调大它。
+             */
+            @Min(60) @DefaultValue("604800") int keyTtlSeconds,
             @Min(100) int commandTimeoutMs,
             @Min(1000) int healthIntervalMs,
             String inflightMode,

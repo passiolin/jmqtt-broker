@@ -19,12 +19,8 @@ import io.netty.handler.codec.mqtt.MqttProperties;
 import io.netty.handler.codec.mqtt.MqttReasonCodeAndPropertiesVariableHeader;
 import online.ipuff.jmqtt.handler.ChannelAttributes;
 import online.ipuff.jmqtt.session.ISessionStoreService;
+import online.ipuff.jmqtt.session.SessionLifecycle;
 import online.ipuff.jmqtt.session.SessionStore;
-import online.ipuff.jmqtt.session.persistence.SessionPersistence;
-import online.ipuff.jmqtt.store.IDupPubRelMessageStoreService;
-import online.ipuff.jmqtt.store.IDupPublishMessageStoreService;
-import online.ipuff.jmqtt.store.IPendingMessageStore;
-import online.ipuff.jmqtt.subscribe.ISubscribeStoreService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -62,29 +58,27 @@ public class DisconnectHandler {
     private static final int REASON_DISCONNECT_WITH_WILL = 0x04;
 
     private final ISessionStoreService sessionStoreService;
-    private final ISubscribeStoreService subscribeStoreService;
-    private final IDupPublishMessageStoreService dupPublishMessageStoreService;
-    private final IDupPubRelMessageStoreService dupPubRelMessageStoreService;
-    private final SessionPersistence sessionPersistence;
-    private final IPendingMessageStore pendingMessageStore;
+    private final SessionLifecycle sessionLifecycle;
+    private final online.ipuff.jmqtt.session.ConnectionRegistry connectionRegistry;
 
     public DisconnectHandler(ISessionStoreService sessionStoreService,
-                             ISubscribeStoreService subscribeStoreService,
-                             IDupPublishMessageStoreService dupPublishMessageStoreService,
-                             IDupPubRelMessageStoreService dupPubRelMessageStoreService,
-                             SessionPersistence sessionPersistence,
-                             IPendingMessageStore pendingMessageStore) {
+                             SessionLifecycle sessionLifecycle,
+                             online.ipuff.jmqtt.session.ConnectionRegistry connectionRegistry) {
         this.sessionStoreService = sessionStoreService;
-        this.subscribeStoreService = subscribeStoreService;
-        this.dupPublishMessageStoreService = dupPublishMessageStoreService;
-        this.dupPubRelMessageStoreService = dupPubRelMessageStoreService;
-        this.sessionPersistence = sessionPersistence;
-        this.pendingMessageStore = pendingMessageStore;
+        this.sessionLifecycle = sessionLifecycle;
+        this.connectionRegistry = connectionRegistry;
     }
 
     public void processDisconnect(Channel channel, MqttMessage msg) {
         String clientId = channel.attr(ChannelAttributes.CLIENT_ID).get();
         if (clientId == null) {
+            channel.close();
+            return;
+        }
+        // 归属校验: 会话若已被新连接接管(本连接是即将关闭的旧连接), 一切会话处置
+        // 都归新连接 —— 这里动手会把新连接刚建立的会话与积压一起销毁
+        if (connectionRegistry.get(clientId) != channel) {
+            log.debug("DISCONNECT 来自已被接管的旧连接, 只关连接不动会话: clientId={}", clientId);
             channel.close();
             return;
         }
@@ -117,20 +111,16 @@ public class DisconnectHandler {
         boolean persistent = session != null && session.isPersistent();
 
         if (!persistent) {
-            subscribeStoreService.removeForClient(clientId);
-            dupPublishMessageStoreService.removeByClient(clientId);
-            dupPubRelMessageStoreService.removeByClient(clientId);
-            sessionStoreService.remove(clientId);
-            // 不保留的会话没有持久化价值, 连同持久层一起清掉
-            pendingMessageStore.removeAll(clientId);
-            sessionPersistence.sessionDestroyed(clientId);
+            // 不保留的会话没有持久化价值, 连同内存与持久层一起清掉
+            sessionLifecycle.destroy(clientId);
         } else {
             // 保留会话与订阅。正常情况下清掉遗嘱(正常断开不该发遗嘱),
             // 除非客户端明确要求「断开并发布遗嘱」
             if (!publishWill) {
                 session.setWillMessage(null);
             }
-            sessionPersistence.saveSession(session);
+            // 记录关闭时刻(过期从现在起算)并落库
+            sessionLifecycle.connectionClosed(clientId);
         }
 
         log.debug("DISCONNECT clientId={} reasonCode=0x{} 保留会话={}",

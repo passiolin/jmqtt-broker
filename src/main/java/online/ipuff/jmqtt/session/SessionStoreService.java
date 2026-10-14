@@ -54,15 +54,9 @@ public class SessionStoreService implements ISessionStoreService {
 
     @Override
     public SessionStore get(String clientId) {
-        SessionStore session = sessions.get(clientId);
-        if (session == null) {
-            return null;
-        }
-        if (session.isExpired()) {
-            sessions.remove(clientId, session);
-            return null;
-        }
-        return session;
+        // 纯读, 无副作用。曾经在这里顺手剔除过期会话, 后果是过期回收绕过了
+        // 级联清理(订阅残留在主题树里) —— 回收统一走 drainExpired + SessionLifecycle
+        return sessions.get(clientId);
     }
 
     @Override

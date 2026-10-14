@@ -62,8 +62,18 @@ public class SessionStore {
     /** 遗嘱消息, 可为 null */
     private volatile WillMessage willMessage;
 
-    /** 最近一次活跃时间(epoch millis), 用于过期判定 */
+    /** 最近一次活跃时间(epoch millis), 仅作观测用(管理面展示), 不参与过期判定 */
     private volatile long lastActiveAt;
+
+    /**
+     * 连接关闭时刻(epoch millis); {@code null} 表示仍在线。
+     *
+     * <p><b>会话过期从「断开」起算, 不从「最后活跃」起算</b> ——
+     * 过期语义是「连接关闭后再保留多久」(v5 §4.1 / v3.1.1 [MQTT-3.1.2-6])。
+     * 用最后活跃时间(只有 PINGREQ 刷新)会两个方向都错:
+     * 在线但不发心跳的客户端被当成过期回收, 离线客户端又提前过期。
+     */
+    private volatile Long closedAt;
 
     public SessionStore(String brokerId, String clientId, boolean cleanSession, long expireSeconds) {
         this(brokerId, clientId, cleanSession, expireSeconds, null, System.currentTimeMillis());
@@ -80,15 +90,43 @@ public class SessionStore {
         this.lastActiveAt = createdAt;
     }
 
+    /**
+     * 会话是否已过期、可以回收。
+     *
+     * <p>在线会话<b>永远不过期</b> —— 网络连接还在时, 会话按定义就是活的。
+     * 断开之后: 保留时长 &le; 0 的立即过期(断开即销毁), 其余从关闭时刻起算。
+     */
     public boolean isExpired() {
-        if (expireSeconds <= 0) {
+        Long closed = this.closedAt;
+        if (closed == null) {
             return false;
         }
-        return System.currentTimeMillis() - lastActiveAt > expireSeconds * 1000L;
+        if (expireSeconds <= 0) {
+            return true;
+        }
+        return System.currentTimeMillis() - closed > expireSeconds * 1000L;
     }
 
     public void touch() {
         this.lastActiveAt = System.currentTimeMillis();
+    }
+
+    /** 连接建立/被接管后调用: 撤销过期判定, 过期时钟清零。 */
+    public void markOpen() {
+        this.closedAt = null;
+        touch();
+    }
+
+    /** 连接关闭时调用: 过期时钟从此刻起算。幂等 —— 只记第一次关闭时刻。 */
+    public void markClosed() {
+        if (this.closedAt == null) {
+            this.closedAt = System.currentTimeMillis();
+        }
+    }
+
+    /** 是否仍在线(有活跃连接)。 */
+    public boolean isOnline() {
+        return closedAt == null;
     }
 
     public String getBrokerId() {

@@ -85,6 +85,12 @@ public class DupPublishMessageStoreService implements IDupPublishMessageStoreSer
     }
 
     @Override
+    public boolean contains(String clientId, int messageId) {
+        ConcurrentHashMap<Integer, DupPublishMessageStore> map = stores.get(clientId);
+        return map != null && map.containsKey(messageId);
+    }
+
+    @Override
     public void remove(String clientId, int messageId) {
         ConcurrentHashMap<Integer, DupPublishMessageStore> map = stores.get(clientId);
         if (map != null) {

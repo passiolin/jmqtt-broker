@@ -75,7 +75,9 @@ class SessionTakeoverServiceTest {
         inboundQos2Store = new InboundQos2Store(TestBrokerProperties.create());
         service = new SessionTakeoverService(connectionRegistry, sessionStoreService,
                 subscribeStoreService, inboundQos2Store, dupPublishStore, dupPubRelStore,
-                pendingStore, online.ipuff.jmqtt.TestNodeMetrics.create());
+                pendingStore,
+                new online.ipuff.jmqtt.store.OfflineEnqueueBuffer(pendingStore, 1000, 10000, true),
+                online.ipuff.jmqtt.TestNodeMetrics.create());
 
         sessionStoreService.put(new SessionStore("node-old", CLIENT, false, 7200));
         subscribeStoreService.put(new SubscribeStore(CLIENT, "sensor/+/temp", 1));
@@ -197,7 +199,9 @@ class SessionTakeoverServiceTest {
         ServiceWithPersistentQueue(IPendingMessageStore store) {
             service = new SessionTakeoverService(connectionRegistry, sessionStoreService,
                     subscribeStoreService, inboundQos2Store, dupPublishStore, dupPubRelStore,
-                    store, online.ipuff.jmqtt.TestNodeMetrics.create());
+                    store,
+                    new online.ipuff.jmqtt.store.OfflineEnqueueBuffer(store, 1000, 10000, true),
+                    online.ipuff.jmqtt.TestNodeMetrics.create());
         }
     }
 

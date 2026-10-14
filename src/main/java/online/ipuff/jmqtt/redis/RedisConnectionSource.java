@@ -95,6 +95,16 @@ public final class RedisConnectionSource implements AutoCloseable {
         }
 
         @Override
+        public String get(String key) {
+            return c.get(key);
+        }
+
+        @Override
+        public Long incr(String key) {
+            return c.incr(key);
+        }
+
+        @Override
         public Map<String, String> hgetall(String key) {
             return c.hgetall(key);
         }
@@ -166,6 +176,16 @@ public final class RedisConnectionSource implements AutoCloseable {
         @Override
         public String hget(String key, String field) {
             return c.hget(key, field);
+        }
+
+        @Override
+        public String get(String key) {
+            return c.get(key);
+        }
+
+        @Override
+        public Long incr(String key) {
+            return c.incr(key);
         }
 
         @Override

@@ -97,6 +97,15 @@ public final class ChannelAttributes {
     public static final AttributeKey<Boolean> SUPERUSER = AttributeKey.valueOf("jmqtt.superuser");
 
     /**
+     * 该连接上已收到过 CONNECT。
+     *
+     * <p>网络连接建立后的<b>第一个报文必须是 CONNECT</b>: 在此之前的任何业务报文
+     * 都没有经过认证(还没有 clientId、没有会话), 处理它们等于开了一条绕过认证的
+     * 消息注入通道。入口据此拦截非 CONNECT 首包。
+     */
+    public static final AttributeKey<Boolean> CONNECT_SEEN = AttributeKey.valueOf("jmqtt.connectSeen");
+
+    /**
      * CONNECT 认证挂起中(HTTP 鉴权等待外部响应)。
      *
      * <p>置位期间入口忽略该连接上的一切后续报文: 规范要求客户端必须等 CONNACK,

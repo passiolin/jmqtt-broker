@@ -27,6 +27,14 @@ public interface IDupPublishMessageStoreService {
 
     List<DupPublishMessageStore> get(String clientId);
 
+    /**
+     * 该会话是否持有此报文标识符的在途消息。
+     *
+     * <p>两个用途: 报文标识符分配时跳过在用值; 收到凭空的 PUBREC/PUBACK 时识别出来
+     * (否则每个伪造标识符都会建一条幽灵在途状态)。
+     */
+    boolean contains(String clientId, int messageId);
+
     void remove(String clientId, int messageId);
 
     void removeByClient(String clientId);

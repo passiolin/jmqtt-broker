@@ -116,12 +116,23 @@ class SessionPersistenceTest {
     }
 
     @Test
-    @DisplayName("会话销毁时清除持久层记录")
+    @DisplayName("会话销毁走归属校验删除(不误删其他节点的会话)")
     void destroyRemovesFromRepository() {
         RecordingRepository repo = new RecordingRepository(true);
         SessionPersistence persistence = new SessionPersistence(repo, new SessionStoreService());
 
         persistence.sessionDestroyed(CLIENT);
+
+        assertEquals(List.of("removeIfOwner:" + CLIENT), repo.calls);
+    }
+
+    @Test
+    @DisplayName("cleanStart 丢弃既有会话走无条件删除")
+    void discardRemovesUnconditionally() {
+        RecordingRepository repo = new RecordingRepository(true);
+        SessionPersistence persistence = new SessionPersistence(repo, new SessionStoreService());
+
+        persistence.sessionDiscarded(CLIENT);
 
         assertEquals(List.of("remove:" + CLIENT), repo.calls);
     }
@@ -171,6 +182,12 @@ class SessionPersistenceTest {
         public PersistedSession load(String clientId) {
             calls.add("load:" + clientId);
             return loadResult;
+        }
+
+        @Override
+        public boolean removeIfOwner(String clientId) {
+            calls.add("removeIfOwner:" + clientId);
+            return true;
         }
 
         @Override

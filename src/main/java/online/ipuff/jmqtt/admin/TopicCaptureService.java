@@ -29,6 +29,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -336,12 +337,16 @@ public class TopicCaptureService {
         if (capture.clientId != null) {
             return; // 客户端维度不在匹配树里
         }
-        List<ActiveCapture> captures = matcher.matchTopic(
-                MqttTopic.levels(capture.filter), null).get(capture.filter);
-        if (captures != null) {
-            captures.remove(capture);
-            if (captures.isEmpty()) {
-                matcher.remove(MqttTopic.levels(capture.filter), capture.filter);
+        // 与 start() 的插入共用一把锁: 树的结构性增删必须串行,
+        // 否则并发 start/stop 会互相覆盖树节点(监听任务静默丢失)
+        synchronized (this) {
+            List<ActiveCapture> captures = matcher.matchTopic(
+                    MqttTopic.levels(capture.filter), null).get(capture.filter);
+            if (captures != null) {
+                captures.remove(capture);
+                if (captures.isEmpty()) {
+                    matcher.remove(MqttTopic.levels(capture.filter), capture.filter);
+                }
             }
         }
     }
@@ -376,13 +381,16 @@ public class TopicCaptureService {
                 System.currentTimeMillis() + durationMinutes * 60_000L, maxMessages);
         active.put(id, capture);
         if (clientId == null) {
-            // topic 维度才进匹配树; 客户端维度在 onPublish/onDeliver 里线性比对
+            // topic 维度才进匹配树; 客户端维度在 onPublish/onDeliver 里线性比对。
+            // 值必须是 CopyOnWriteArrayList: onPublish 在任意发布者的 event loop 上
+            // 遍历它, 而 stop/finish 会从别的线程删除 —— 普通 ArrayList 会在热路径上
+            // 抛 ConcurrentModificationException, 经 exceptionCaught 掐断无关发布者的连接
             synchronized (this) {
                 List<ActiveCapture> captures = matcher.matchTopic(
                         MqttTopic.levels(filter), null).get(filter);
                 if (captures == null) {
                     matcher.insert(MqttTopic.levels(filter), filter,
-                            new ArrayList<>(List.of(capture)));
+                            new CopyOnWriteArrayList<>(List.of(capture)));
                 } else {
                     captures.add(capture);
                 }

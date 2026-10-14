@@ -22,13 +22,10 @@ import io.netty.handler.codec.mqtt.MqttTopicSubscription;
 import online.ipuff.jmqtt.authz.AclGate;
 import online.ipuff.jmqtt.authz.IAclService;
 import online.ipuff.jmqtt.handler.ChannelAttributes;
-import online.ipuff.jmqtt.message.DupPublishMessageStore;
 import online.ipuff.jmqtt.message.RetainMessageStore;
 import online.ipuff.jmqtt.message.SubscribeStore;
 import online.ipuff.jmqtt.router.MqttTopic;
 import online.ipuff.jmqtt.session.persistence.SessionPersistence;
-import online.ipuff.jmqtt.store.IDupPublishMessageStoreService;
-import online.ipuff.jmqtt.store.IMessageIdService;
 import online.ipuff.jmqtt.store.IRetainMessageStoreService;
 import online.ipuff.jmqtt.subscribe.ISubscribeStoreService;
 import org.slf4j.Logger;
@@ -64,21 +61,18 @@ public class SubscribeHandler {
 
     private final ISubscribeStoreService subscribeStoreService;
     private final IRetainMessageStoreService retainMessageStoreService;
-    private final IMessageIdService messageIdService;
-    private final IDupPublishMessageStoreService dupPublishMessageStoreService;
+    private final online.ipuff.jmqtt.cluster.InternalSendServer internalSendServer;
     private final SessionPersistence sessionPersistence;
     private final IAclService aclService;
 
     public SubscribeHandler(ISubscribeStoreService subscribeStoreService,
                             IRetainMessageStoreService retainMessageStoreService,
-                            IMessageIdService messageIdService,
-                            IDupPublishMessageStoreService dupPublishMessageStoreService,
+                            online.ipuff.jmqtt.cluster.InternalSendServer internalSendServer,
                             SessionPersistence sessionPersistence,
                             IAclService aclService) {
         this.subscribeStoreService = subscribeStoreService;
         this.retainMessageStoreService = retainMessageStoreService;
-        this.messageIdService = messageIdService;
-        this.dupPublishMessageStoreService = dupPublishMessageStoreService;
+        this.internalSendServer = internalSendServer;
         this.sessionPersistence = sessionPersistence;
         this.aclService = aclService;
     }
@@ -262,18 +256,12 @@ public class SubscribeHandler {
         }
         for (RetainMessageStore retain : retains) {
             int deliveryQos = Math.min(retain.qos(), subscribeQos);
-            int packetId = 0;
-            if (deliveryQos > 0) {
-                packetId = messageIdService.nextMessageId();
-                dupPublishMessageStoreService.put(new DupPublishMessageStore(
-                        clientId, retain.topic(), deliveryQos, packetId, retain.payload()));
-            }
-            // retain=1: 因新订阅而投递的保留消息(规范要求置位)。
-            // 必须走 ReplyFactory —— v5 连接的可变头需要 properties 长度字段, 否则客户端整体错位
-            channel.write(ReplyFactory.publish(channel, retain.topic(), deliveryQos,
-                    packetId, retain.payload(), true, false));
+            // 走统一投递路径: 占发送窗口、分配并登记报文标识符(retain=1 由该路径置位)。
+            // 直接 channel.write 会绕过窗口 —— 一次订阅命中大量保留消息时
+            // 突破客户端 Receive Maximum, 且标识符不进在途账本
+            internalSendServer.deliverRetained(channel, clientId,
+                    retain.topic(), retain.payload(), deliveryQos);
         }
-        channel.flush();
         log.debug("投递保留消息 clientId={} topicFilter={} 数量={}", clientId, topicFilter, retains.size());
     }
 

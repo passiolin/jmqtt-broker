@@ -116,7 +116,14 @@ class ConnectHandlerAuthTest {
                 sessionStoreService, subscribeStoreService, dupPublishStore, dupPubRelStore,
                 connectionRegistry, sessionPersistence, clusterBus, internalSendServer,
                 backpressureMetrics, inflightPersistence, adminStatePublisher,
-                new InboundQos2Store(props), online.ipuff.jmqtt.TestNodeMetrics.create());
+                new InboundQos2Store(props), online.ipuff.jmqtt.TestNodeMetrics.create(),
+                new online.ipuff.jmqtt.session.SessionLifecycle(
+                        sessionStoreService, subscribeStoreService, dupPublishStore, dupPubRelStore,
+                        new InboundQos2Store(props), new InMemoryPendingMessageStore(),
+                        new online.ipuff.jmqtt.store.OfflineEnqueueBuffer(new InMemoryPendingMessageStore(),
+                                props.maxOfflineQueueLen(),
+                                online.ipuff.jmqtt.store.OfflineEnqueueBuffer.DEFAULT_MAX_BUFFERED, true),
+                        new MessageIdService(), sessionPersistence));
     }
 
     private static MqttConnectMessage connect(boolean v5, String clientId,

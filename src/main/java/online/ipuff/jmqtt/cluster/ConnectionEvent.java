@@ -33,8 +33,8 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  *  "reason":"tcp_closed","disconnected_at":1770000001000}
  * </pre>
  *
- * <p>record 的 Kafka key 是 clientid —— 同一客户端的事件严格有序,
- * 后台按 key 即可还原设备的完整在线状态机。
+ * <p>record 的 Kafka key 是 clientid —— 同一客户端的事件落同一分区,
+ * 按分区内顺序消费即可还原设备的在线状态机(跨节点尽力有序)。
  *
  * @param action          {@link #ACTION_CONNECTED} 或 {@link #ACTION_DISCONNECTED}
  * @param clientid        客户端标识

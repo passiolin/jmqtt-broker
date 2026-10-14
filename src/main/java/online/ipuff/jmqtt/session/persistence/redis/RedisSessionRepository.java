@@ -89,10 +89,45 @@ public class RedisSessionRepository implements ISessionRepository {
                     + "local ttl = tonumber(ARGV[2]) "
                     + "if ttl > 0 then "
                     + "  redis.call('EXPIRE', KEYS[1], ttl) "
-                    + "  redis.call('EXPIRE', KEYS[2], ttl) "
+                    + "end "
+                    + "local keyTtl = tonumber(ARGV[4]) "
+                    + "if keyTtl > 0 then "
+                    + "  redis.call('EXPIRE', KEYS[2], keyTtl) "
                     + "end "
                     + "if prev == false then return '' end "
                     + "return prev";
+
+    /**
+     * 归属校验删除: 仅当会话记录归属本节点(或已不存在, 属悬挂残留)时删除。
+     *
+     * <p>无条件删除的后果很具体: 本节点上一份陈旧副本过期回收时, 会把<b>别的节点
+     * 正在服务</b>的会话记录一并删掉 —— 下次重连 sessionPresent=false, 订阅与
+     * 离线积压全部消失。归属是 Redis 里的字段, 比对与删除必须在同一个 Lua 里原子完成。
+     */
+    private static final String REMOVE_IF_OWNER_SCRIPT =
+            "local owner = redis.call('HGET', KEYS[1], 'node') "
+                    + "if owner == false or owner == ARGV[1] then "
+                    + "  redis.call('DEL', KEYS[1], KEYS[2]) "
+                    + "  return 1 "
+                    + "end "
+                    + "return 0";
+
+    /**
+     * 归属校验写入: 记录归属其他节点时不覆盖(返回 0)。
+     *
+     * <p>写入与校验必须原子 —— 否则本节点的延迟清理/断开回调会在新节点刚写完
+     * 归属之后把它覆盖回自己, 归属字段就这么被挤掉, 接管方的记录面目全非。
+     * HSET 与 EXPIRE 也在同一个脚本里, 消除「写完没设 TTL 的永生 key」。
+     */
+    private static final String SAVE_IF_OWNER_SCRIPT =
+            "local owner = redis.call('HGET', KEYS[1], 'node') "
+                    + "if owner ~= false and owner ~= ARGV[1] then return 0 end "
+                    + "for i = 3, #ARGV, 2 do "
+                    + "  redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1]) "
+                    + "end "
+                    + "local ttl = tonumber(ARGV[2]) "
+                    + "if ttl > 0 then redis.call('EXPIRE', KEYS[1], ttl) end "
+                    + "return 1";
 
     private final BrokerProperties properties;
     private final RedisConnectionManager redis;
@@ -147,32 +182,37 @@ public class RedisSessionRepository implements ISessionRepository {
                 new String[]{sessionKey(clientId), subsKey(clientId)},
                 nodeId,
                 Long.toString(expireSeconds),
-                Long.toString(System.currentTimeMillis())), "");
+                Long.toString(System.currentTimeMillis()),
+                Long.toString(properties.redis().keyTtlSeconds())), "");
         return (previous == null || previous.isEmpty()) ? null : previous;
     }
 
     @Override
     public void saveSession(String clientId, String nodeId, boolean cleanSession,
                             long expireSeconds, WillMessage willMessage) {
-        Map<String, String> fields = new HashMap<>();
-        fields.put(FIELD_NODE, nodeId);
-        fields.put(FIELD_CLEAN, cleanSession ? "1" : "0");
-        fields.put(FIELD_EXPIRE, Long.toString(expireSeconds));
-        fields.put(FIELD_CREATED, Long.toString(System.currentTimeMillis()));
-        fields.put(FIELD_TOUCHED, Long.toString(System.currentTimeMillis()));
+        List<String> args = new ArrayList<>();
+        args.add(nodeId);                                    // ARGV[1] 归属校验值
+        args.add(Long.toString(expireSeconds));              // ARGV[2] TTL
+        args.add(FIELD_NODE);
+        args.add(nodeId);
+        args.add(FIELD_CLEAN);
+        args.add(cleanSession ? "1" : "0");
+        args.add(FIELD_EXPIRE);
+        args.add(Long.toString(expireSeconds));
+        args.add(FIELD_CREATED);
+        args.add(Long.toString(System.currentTimeMillis()));
+        args.add(FIELD_TOUCHED);
+        args.add(Long.toString(System.currentTimeMillis()));
         String will = encodeWill(willMessage);
         if (will != null) {
-            fields.put(FIELD_WILL, will);
+            args.add(FIELD_WILL);
+            args.add(will);
         }
-        execute("saveSession", () -> {
-            RedisSyncCommands cmd = commands();
-            String key = sessionKey(clientId);
-            cmd.hset(key, fields);
-            if (expireSeconds > 0) {
-                cmd.expire(key, expireSeconds);
-            }
-            return Boolean.TRUE;
-        }, Boolean.FALSE);
+        execute("saveSession", () -> commands().eval(
+                SAVE_IF_OWNER_SCRIPT,
+                ScriptOutputType.INTEGER,
+                new String[]{sessionKey(clientId)},
+                args.toArray(new String[0])), null);
     }
 
     @Override
@@ -181,10 +221,9 @@ public class RedisSessionRepository implements ISessionRepository {
             RedisSyncCommands cmd = commands();
             String key = subsKey(clientId);
             cmd.hset(key, topicFilter, Integer.toString(qos));
-            long expireSeconds = sessionExpireSeconds(clientId);
-            if (expireSeconds > 0) {
-                cmd.expire(key, expireSeconds);
-            }
+            // 派生 key 用统一的 TTL 上限(见 RedisProperties#keyTtlSeconds),
+            // 不再每次读会话 expire —— 少一次往返, 也不会与会话 TTL 漂移
+            cmd.expire(key, properties.redis().keyTtlSeconds());
             return Boolean.TRUE;
         }, Boolean.FALSE);
     }
@@ -211,6 +250,17 @@ public class RedisSessionRepository implements ISessionRepository {
             commands().del(sessionKey(clientId), subsKey(clientId));
             return Boolean.TRUE;
         }, Boolean.FALSE);
+    }
+
+    @Override
+    public boolean removeIfOwner(String clientId) {
+        Long deleted = execute("removeIfOwner", () -> commands().eval(
+                REMOVE_IF_OWNER_SCRIPT,
+                ScriptOutputType.INTEGER,
+                new String[]{sessionKey(clientId), subsKey(clientId)},
+                properties.id()), null);
+        // null = Redis 不可用: 拿不到归属就不能删(删了可能毁掉别人的会话), 由 TTL 兜底
+        return deleted != null && deleted > 0;
     }
 
     // ------------------------------------------------------------------
@@ -240,12 +290,6 @@ public class RedisSessionRepository implements ISessionRepository {
 
     private String subsKey(String clientId) {
         return properties.redis().keyPrefix() + KEY_SEGMENT_SUBS + "{" + clientId + "}";
-    }
-
-    private long sessionExpireSeconds(String clientId) {
-        String value = execute("readExpire",
-                () -> commands().hget(sessionKey(clientId), FIELD_EXPIRE), null);
-        return parseLong(value, 0L);
     }
 
     private static int parseQos(String value) {

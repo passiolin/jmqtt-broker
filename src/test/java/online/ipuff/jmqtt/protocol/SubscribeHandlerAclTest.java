@@ -26,12 +26,17 @@ import io.netty.handler.codec.mqtt.MqttTopicSubscription;
 import io.netty.handler.codec.mqtt.MqttVersion;
 import online.ipuff.jmqtt.TestBrokerProperties;
 import online.ipuff.jmqtt.authz.IAclService;
+import online.ipuff.jmqtt.cluster.InternalSendServer;
 import online.ipuff.jmqtt.config.BrokerProperties;
 import online.ipuff.jmqtt.handler.ChannelAttributes;
+import online.ipuff.jmqtt.session.BackpressureMetrics;
+import online.ipuff.jmqtt.session.ConnectionRegistry;
+import online.ipuff.jmqtt.session.QosMetrics;
 import online.ipuff.jmqtt.session.SessionStoreService;
 import online.ipuff.jmqtt.session.persistence.NoopSessionRepository;
 import online.ipuff.jmqtt.session.persistence.SessionPersistence;
 import online.ipuff.jmqtt.store.DupPublishMessageStoreService;
+import online.ipuff.jmqtt.store.InMemoryPendingMessageStore;
 import online.ipuff.jmqtt.store.MessageIdService;
 import online.ipuff.jmqtt.store.RetainMessageStoreService;
 import online.ipuff.jmqtt.subscribe.ISubscribeStoreService;
@@ -91,9 +96,20 @@ class SubscribeHandlerAclTest {
         subscribeStoreService = new SubscribeStoreService();
         SessionStoreService sessionStoreService = new SessionStoreService();
         acl = new StubAcl();
+        online.ipuff.jmqtt.store.OfflineEnqueueBuffer offlineBuffer =
+                new online.ipuff.jmqtt.store.OfflineEnqueueBuffer(new InMemoryPendingMessageStore(),
+                        props.maxOfflineQueueLen(),
+                        online.ipuff.jmqtt.store.OfflineEnqueueBuffer.DEFAULT_MAX_BUFFERED, true);
+        InternalSendServer internalSendServer = new InternalSendServer(
+                subscribeStoreService, new ConnectionRegistry(), new MessageIdService(),
+                new DupPublishMessageStoreService(), sessionStoreService,
+                new InMemoryPendingMessageStore(), offlineBuffer,
+                props, new BackpressureMetrics(), new QosMetrics(),
+                new online.ipuff.jmqtt.admin.TopicCaptureService(
+                        online.ipuff.jmqtt.TestObjectProviders.empty(),
+                        new online.ipuff.jmqtt.admin.AdminRedisKeys(props), props));
         handler = new SubscribeHandler(
-                subscribeStoreService, new RetainMessageStoreService(), new MessageIdService(),
-                new DupPublishMessageStoreService(),
+                subscribeStoreService, new RetainMessageStoreService(), internalSendServer,
                 new SessionPersistence(new NoopSessionRepository(), sessionStoreService), acl);
     }
     private EmbeddedChannel clientChannel(boolean v5) {

@@ -56,7 +56,7 @@ class RedisModeConfigTest {
 
     private static RedisProperties redis(String mode, String masterId, List<String> nodes,
                                          String host, int port, int database) {
-        return new RedisProperties(true, host, port, null, database, "jmqtt",
+        return new RedisProperties(true, host, port, null, database, "jmqtt", 604800,
                 1000, 5000, "off", 100, 10000, mode, masterId, nodes);
     }
 

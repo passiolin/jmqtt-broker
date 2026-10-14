@@ -98,6 +98,13 @@ public class PublishHandler {
 
     public void processPublish(Channel channel, MqttPublishMessage msg) {
         String clientId = channel.attr(ChannelAttributes.CLIENT_ID).get();
+        if (clientId == null || clientId.isEmpty()) {
+            // 兜底: 正常情况下入口已拦下 CONNECT 之前的报文。
+            // 真走到这里说明连接状态没建立, 投递只会读到空值
+            log.warn("收到未经握手的 PUBLISH, 断开连接: remote={}", channel.remoteAddress());
+            channel.close();
+            return;
+        }
         String topic = msg.variableHeader().topicName();
         int qos = msg.fixedHeader().qosLevel().value();
         boolean v5 = ReplyFactory.isV5(channel);
