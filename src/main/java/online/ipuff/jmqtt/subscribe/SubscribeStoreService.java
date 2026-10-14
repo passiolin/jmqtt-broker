@@ -126,6 +126,14 @@ public class SubscribeStoreService implements ISubscribeStoreService {
     }
 
     @Override
+    public boolean hasSubscribers(String topic) {
+        if (topic == null || topic.isEmpty()) {
+            return false;
+        }
+        return trie.hasMatch(MqttTopic.levels(topic));
+    }
+
+    @Override
     public Collection<SubscribeStore> subscriptionsOf(String clientId) {
         Map<String, SubscribeStore> filters = clientIndex.get(clientId);
         if (filters == null || filters.isEmpty()) {

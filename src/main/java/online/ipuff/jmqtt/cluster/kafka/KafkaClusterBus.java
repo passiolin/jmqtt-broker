@@ -304,7 +304,7 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
         if (uplinkAll) {
             return true;
         }
-        return !uplinkTrie.matchTopic(MqttTopic.levels(topic), null).isEmpty();
+        return uplinkTrie.hasMatch(MqttTopic.levels(topic));
     }
 
     @Override
@@ -319,7 +319,7 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
         if (topic == null || topic.isEmpty()) {
             return false;
         }
-        boolean allowed = !broadcastTrie.matchTopic(MqttTopic.levels(topic), null).isEmpty();
+        boolean allowed = broadcastTrie.hasMatch(MqttTopic.levels(topic));
         if (!allowed) {
             // 计进指标而不是打日志: 关掉广播之后每一批遥测都会走到这里,
             // 打日志等于用日志把磁盘写满
@@ -837,7 +837,7 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
         // 无匹配订阅者则跳过反序列化和投递 —— 30 万连接下大多数消息
         // 只涉及本节点 1~2 个订阅者, 远端节点的无效消费占了大量 CPU。
         String topic = record.key();
-        if (topic != null && subscribeStoreService.search(topic).isEmpty()) {
+        if (topic != null && !subscribeStoreService.hasSubscribers(topic)) {
             skippedNoLocalSubCount.incrementAndGet();
             return;
         }
@@ -1178,7 +1178,7 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
                 return true;
             }
             return topic != null && !topic.isEmpty()
-                    && !trie.matchTopic(MqttTopic.levels(topic), null).isEmpty();
+                    && trie.hasMatch(MqttTopic.levels(topic));
         }
     }
 

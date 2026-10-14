@@ -41,9 +41,11 @@ import java.util.function.BinaryOperator;
  *
  * <h2>并发模型</h2>
  * 读路径完全无锁(依赖 {@link ConcurrentHashMap} 的弱一致性迭代, 匹配期间新写入的
- * 订阅最多晚一次投递才生效)。写路径由内部写锁串行化 —— 写只发生在本节点客户端的
- * 订阅变更上, 属于低频操作, 单把锁足够; 同时这也消除了「剪枝删节点」与
- * 「并发插入同一节点」之间的竞态。
+ * 订阅最多晚一次投递才生效)。写路径按<b>首层分片加锁</b>: 取 {@code levels[0]} 的哈希
+ * 选一把锁, 同一路径的插入/删除/剪枝必然同锁 —— 「剪枝删节点」与「并发插入同一节点」
+ * 之间的竞态依旧被排除; 而首层不同的写互不阻塞, 重连风暴下不同主题树前缀并行变更。
+ * 节点只有「从根到节点」一条路径, 首层相同即整棵子树相同, 因此分片锁不需要覆盖
+ * 首层之外的共享结构(根的 children 是 {@link ConcurrentHashMap}, 按键操作天然互不干扰)。
  *
  * @param <V> 节点上存放的值类型
  */
@@ -63,8 +65,24 @@ public final class TopicTrie<V> {
 
     private final Node<V> root = new Node<>();
 
-    /** 写锁: 只保护 insert / remove / clear。读数路径不加锁。 */
-    private final ReentrantLock writeLock = new ReentrantLock();
+    /** 写锁分片数。按 {@code levels[0]} 哈希取锁, 首层不同的写互不阻塞。 */
+    private static final int WRITE_SHARDS = 16;
+
+    /** 写锁: 只保护 insert / remove / clear。读路径不加锁。 */
+    private final ReentrantLock[] writeLocks = createLocks();
+
+    private static ReentrantLock[] createLocks() {
+        ReentrantLock[] locks = new ReentrantLock[WRITE_SHARDS];
+        for (int i = 0; i < WRITE_SHARDS; i++) {
+            locks[i] = new ReentrantLock();
+        }
+        return locks;
+    }
+
+    private static int shardOf(String[] levels) {
+        String first = levels.length == 0 ? "" : levels[0];
+        return Math.floorMod(first.hashCode(), WRITE_SHARDS);
+    }
 
     // ------------------------------------------------------------------
     // 写入
@@ -78,7 +96,8 @@ public final class TopicTrie<V> {
      * @param value  值
      */
     public void insert(String[] levels, String key, V value) {
-        writeLock.lock();
+        ReentrantLock lock = writeLocks[shardOf(levels)];
+        lock.lock();
         try {
             Node<V> node = root;
             for (String level : levels) {
@@ -86,7 +105,7 @@ public final class TopicTrie<V> {
             }
             node.values.put(key, value);
         } finally {
-            writeLock.unlock();
+            lock.unlock();
         }
     }
 
@@ -99,11 +118,12 @@ public final class TopicTrie<V> {
      * @return 是否确实删除了内容
      */
     public boolean remove(String[] levels, String key) {
-        writeLock.lock();
+        ReentrantLock lock = writeLocks[shardOf(levels)];
+        lock.lock();
         try {
             return remove(root, levels, 0, key);
         } finally {
-            writeLock.unlock();
+            lock.unlock();
         }
     }
 
@@ -124,12 +144,18 @@ public final class TopicTrie<V> {
     }
 
     public void clear() {
-        writeLock.lock();
+        // 清整棵树, 必须独占全部分片 —— 按下标序号加锁; 其他操作最多持有一把分片锁,
+        // 不会形成环, 无死锁风险
+        for (ReentrantLock lock : writeLocks) {
+            lock.lock();
+        }
         try {
             root.children.clear();
             root.values.clear();
         } finally {
-            writeLock.unlock();
+            for (int i = writeLocks.length - 1; i >= 0; i--) {
+                writeLocks[i].unlock();
+            }
         }
     }
 
@@ -198,6 +224,41 @@ public final class TopicTrie<V> {
                 out.merge(key, value, merger);
             }
         });
+    }
+
+    /**
+     * 判断是否存在命中该主题的记录, 命中即返回, 不物化结果集。
+     *
+     * <p>与 {@link #matchTopic} 同向(主题驱动)、同语义 —— {@code !hasMatch(levels)}
+     * 恒等于 {@code matchTopic(levels, null).isEmpty()} —— 但跳过整棵结果树的收集。
+     * 服务「只想知道有没有人订阅」的判空场景: 这类调用在投递热路径上按消息计,
+     * 为判空而物化整张结果表是纯浪费。
+     */
+    public boolean hasMatch(String[] topicLevels) {
+        return hasAny(root, topicLevels, 0);
+    }
+
+    private boolean hasAny(Node<V> node, String[] levels, int index) {
+        if (index == levels.length) {
+            Node<V> multi = node.children.get(MqttTopic.MULTI_WILDCARD);
+            return (multi != null && !multi.values.isEmpty()) || !node.values.isEmpty();
+        }
+
+        boolean metadataTopic = index == 0 && MqttTopic.isMetadataLevel(levels[0]);
+
+        if (!metadataTopic) {
+            Node<V> multi = node.children.get(MqttTopic.MULTI_WILDCARD);
+            if (multi != null && !multi.values.isEmpty()) {
+                return true;
+            }
+            Node<V> single = node.children.get(MqttTopic.SINGLE_WILDCARD);
+            if (single != null && hasAny(single, levels, index + 1)) {
+                return true;
+            }
+        }
+
+        Node<V> exact = node.children.get(levels[index]);
+        return exact != null && hasAny(exact, levels, index + 1);
     }
 
     // ------------------------------------------------------------------

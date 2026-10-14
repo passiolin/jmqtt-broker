@@ -60,6 +60,14 @@ public interface ISubscribeStoreService {
     List<SubscribeStore> search(String topic);
 
     /**
+     * 判断该主题是否有人订阅, 不物化订阅者列表。
+     *
+     * <p>投递热路径上的判空场景用它 —— 集群消费的早期过滤只需要一个布尔答案,
+     * 走 {@link #search} 会白白收集整张结果表。
+     */
+    boolean hasSubscribers(String topic);
+
+    /**
      * 指定客户端的全部订阅。
      */
     Collection<SubscribeStore> subscriptionsOf(String clientId);
