@@ -10,6 +10,8 @@
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 package online.ipuff.jmqtt.protocol;
 
@@ -17,19 +19,26 @@ import io.netty.handler.codec.mqtt.MqttConnectMessage;
 import online.ipuff.jmqtt.config.BrokerProperties;
 
 /**
- * 从 CONNECT 报文里解析出、与协议版本无关的连接选项。
+ * 从 CONNECT 报文里解析出连接选项。
  *
- * <h2>这个分支只处理 3.1.1</h2>
- * 3.1.1 的 CONNECT 里没有 Session Expiry Interval、Receive Maximum、Maximum Packet Size、
- * Topic Alias、Will Delay 这些字段, 因此这里的三项全部来自两条输入:
- * 报文里的 {@code cleanSession} 位, 以及服务端配置。
+ * <h2>服务 3.1 与 3.1.1 两个协议级别</h2>
+ * 两者在报文层面几乎一致：CONNECT 的 payload 结构相同（3.1 没有 Will Properties，
+ * 那本来就是 v5 才有的），PUBLISH/PUBACK/PUBREC/PUBREL/PUBCOMP/SUBSCRIBE/UNSUBSCRIBE
+ * 的字节布局完全一样。实测（Netty 4.1.77 编码器）两者编出的 SUBACK / PUBACK /
+ * UNSUBACK / CONNACK 逐字节相同，差别只在两条规范细节上：
  *
- * <p>保留的两项：
  * <ul>
- *   <li>{@code cleanSession} —— 丢弃既有会话</li>
- *   <li>{@code sessionExpirySeconds} —— 服务端决定的会话保留时长（3.1.1 无此字段，
- *       由 {@code jmqtt.broker.session-expiry-seconds} 统一给出）</li>
+ *   <li><b>3.1 的 CONNACK 里 bit0 是「Topic Name Compression Response」保留位</b>，
+ *       不是 3.1.1 的 Session Present。Netty 对 3.1 也按 Session Present 写，
+ *       我们这里恒回 {@code false}（会话不存在时才可能为 true，见下方说明），
+ *       因此两种解读下都是 0，不会造成误判。</li>
+ *   <li><b>3.1 的 clientId 限定 1~23 个字符</b>，超长由解码器直接判
+ *       {@code MqttIdentifierRejectedException}。这条不需要在业务层重复校验。</li>
  * </ul>
+ *
+ * <p>两个版本都不存在 Session Expiry Interval / Receive Maximum / Maximum Packet Size /
+ * Topic Alias / Will Delay —— 那些是 v5 才有的字段。所以这里的两项全部来自
+ * 报文里的 {@code cleanSession} 位与服务端配置。
  *
  * @param cleanSession          是否丢弃既有会话
  * @param sessionExpirySeconds  服务端采用的会话保留秒数；0 表示断开即销毁
@@ -39,7 +48,10 @@ public record ConnectOptions(
         long sessionExpirySeconds
 ) {
 
-    /** 协议级别 4 = MQTT 3.1.1 */
+    /** 协议级别 3 = MQTT 3.1（协议名 MQIsdp） */
+    public static final int VERSION_3_1 = 3;
+
+    /** 协议级别 4 = MQTT 3.1.1（协议名 MQTT） */
     public static final int VERSION_3_1_1 = 4;
 
     /**
@@ -50,7 +62,7 @@ public record ConnectOptions(
     }
 
     /**
-     * 从 CONNECT 报文解析。3.1.1 只有 cleanSession 一个开关，其余取服务端配置。
+     * 从 CONNECT 报文解析。两个版本都只有 {@code cleanSession} 一个开关，其余取服务端配置。
      */
     public static ConnectOptions parse(MqttConnectMessage msg, BrokerProperties brokerProperties) {
         boolean cleanSession = msg.variableHeader().isCleanSession();

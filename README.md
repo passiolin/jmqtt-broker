@@ -2,10 +2,19 @@
 
 基于 **Netty + Spring Boot** 的 MQTT Broker，单模块 Maven 工程。
 
-> **本分支（`v3-lite`）只支持 MQTT 3.1.1。**
+> **本分支（`v3-lite`）支持 MQTT 3.1.1，同时兼容 3.1。**
 >
-> v5 客户端在 CONNECT 阶段被明确拒绝（CONNACK 返回「协议版本不支持」），不会静默降级。
-> 保留 v5 的 `main` 分支仍然完整可用，两者的差别见文末「与 main 的差异」。
+> 3.1（协议名 `MQIsdp`）与 3.1.1 在报文层面几乎一致：CONNECT 的 payload 结构相同，
+> PUBLISH / PUBACK / PUBREC / PUBREL / PUBCOMP / SUBSCRIBE / UNSUBSCRIBE 的字节布局相同，
+> 实测两者编出的 SUBACK / PUBACK / UNSUBACK / CONNACK 逐字节相同。差别只有两条：
+> 3.1 的 clientId 限定 1~23 字符（超长由解码器直接拒），以及 3.1 的 CONNACK bit0
+> 是「Topic Name Compression Response」保留位而非 Session Present（我们这一位恒为 0，
+> 两种解读下都不产生误判）。因此 3.1 客户端走的是同一条路径。
+>
+> v5 客户端仍在 CONNECT 阶段被拒绝（CONNACK 返回「协议版本不支持」）——
+> 这不是「不支持就拒」，而是 v5 一旦放行，每一条回包的字节形态都会错位
+> （CONNACK 要带 properties 长度、PUBACK 要带原因码、UNSUBACK 必须带 payload），
+> 连上之后是难以定位的坏字节而不是功能降级。保留 v5 的 `main` 分支仍然完整可用。
 >
 > 裁剪的理由是**场景匹配**而不是性能：终端固件只实现 3.1.1，v5 的 properties 解析、
 > 原因码映射、会话生命周期语义在本场景中永远不会被执行；而两个版本对同一语义的字节
@@ -49,7 +58,7 @@ Kafka 若启用，只承担集群消息总线与上行数据面，同样不在�
 | 构建 | Maven，**单模块** |
 | 网络 | Netty 4.1.x（版本由 Spring Boot 的 netty-bom 统一管理） |
 | 编解码 | `io.netty:netty-codec-mqtt`（官方库，支持 v3.1 / v3.1.1 / v5.0） |
-| 协议 | **MQTT 3.1.1**（v5 客户端在握手阶段拒绝） |
+| 协议 | **MQTT 3.1.1**，兼容 **3.1**（v5 客户端在握手阶段拒绝） |
 | 许可 | Apache License 2.0 |
 
 ## 快速开始
@@ -249,9 +258,9 @@ MQTT 报文的编解码使用 [Netty](https://netty.io) 官方的 `netty-codec-m
 
 | 项 | main | v3-lite |
 |---|---|---|
-| 协议 | 3.1.1 + 5.0 双栈 | **仅 3.1.1**；v5 客户端在 CONNECT 阶段拒绝 |
-| `ReplyFactory` | 324 行，9 处版本分支 | **209 行，无版本分支** |
-| `ConnectOptions` | 8 个字段（含 SEI / Receive Maximum / Packet Size / Alias / Will Delay） | **3 个字段**（cleanSession / sessionExpiry / receiveMaximum） |
+| 协议 | 3.1.1 + 5.0 双栈 | **3.1.1，兼容 3.1**；v5 客户端在 CONNECT 阶段拒绝 |
+| `ReplyFactory` | 324 行，9 处版本分支 | **191 行，无版本分支** |
+| `ConnectOptions` | 8 个字段（含 SEI / Receive Maximum / Packet Size / Alias / Will Delay） | **2 个字段**（cleanSession / sessionExpiry） |
 | 出站回包 | 按连接版本构造两套形态 | 只有一种形态 |
 | 订阅处理 | 含 Retain Handling 选项与 v5 细分失败码 | 只有 0x80 一个失败码；每次订阅都投递保留消息 |
 | ACL 拒绝 | v5 回 0x87 原因码；3.1.1 静默丢弃 | 只有静默丢弃 |

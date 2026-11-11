@@ -15,12 +15,16 @@
  */
 package online.ipuff.jmqtt.auth;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.mqtt.MqttConnAckMessage;
 import io.netty.handler.codec.mqtt.MqttConnectMessage;
 import io.netty.handler.codec.mqtt.MqttConnectPayload;
 import io.netty.handler.codec.mqtt.MqttConnectReturnCode;
 import io.netty.handler.codec.mqtt.MqttConnectVariableHeader;
+import io.netty.handler.codec.mqtt.MqttDecoder;
+import io.netty.handler.codec.mqtt.MqttEncoder;
 import io.netty.handler.codec.mqtt.MqttFixedHeader;
 import io.netty.handler.codec.mqtt.MqttMessageType;
 import io.netty.handler.codec.mqtt.MqttProperties;
@@ -260,5 +264,111 @@ class ConnectHandlerAuthTest {
                 "协议版本不支持时不应进入认证挂起");
         assertNull(channel.attr(ChannelAttributes.CLIENT_ID).get(), "不得注册连接");
         assertFalse(connectionRegistry.isOnline("client-1"));
+    }
+
+    /**
+     * MQTT 3.1（协议名 MQIsdp / 级别 3）与 3.1.1 在报文层面几乎一致,
+     * 只有「连上之后回包必然错位」才值得拒绝 —— 3.1 不属于那一类, 应当放行。
+     */
+    @Test
+    @DisplayName("MQTT 3.1 客户端被正常接受, 与 3.1.1 走同一条路径")
+    void mqtt31Accepted() {
+        EmbeddedChannel channel = new EmbeddedChannel();
+        handler.processConnect(channel, connectWithVersion(3, "legacy-1", "jmqtt", "jmqtt"));
+
+        // 认证开启时会先挂起, 因此这里可能还没有 CONNACK
+        authGate.complete(AuthResult.ALLOW);
+        channel.runPendingTasks();
+
+        MqttConnAckMessage connAck = channel.readOutbound();
+        assertNotNull(connAck, "3.1 必须被接受并回 CONNACK");
+        assertEquals(MqttConnectReturnCode.CONNECTION_ACCEPTED,
+                connAck.variableHeader().connectReturnCode());
+        assertEquals("legacy-1", channel.attr(ChannelAttributes.CLIENT_ID).get());
+        assertTrue(connectionRegistry.isOnline("legacy-1"), "3.1 连接必须注册");
+    }
+
+    /**
+     * 3.1 的 CONNECT 不带 Will Properties（那是 v5 才有的字段），
+     * 解码后的报文结构与 3.1.1 一致，所以复用同一个 connect 构造只改级别与协议名。
+     */
+    private static MqttConnectMessage connectWithVersion(int level, String clientId,
+                                                         String username, String password) {
+        byte[] passwordBytes = password == null ? null : password.getBytes(StandardCharsets.UTF_8);
+        MqttConnectPayload payload = new MqttConnectPayload(
+                clientId, null, (byte[]) null, username, passwordBytes);
+        MqttConnectVariableHeader header = new MqttConnectVariableHeader(
+                level == 3 ? "MQIsdp" : "MQTT", level, username != null, password != null,
+                false, 0, false, true, 30, null);
+        return new MqttConnectMessage(new MqttFixedHeader(
+                MqttMessageType.CONNECT, false, MqttQoS.AT_MOST_ONCE, false, 0), header, payload);
+    }
+
+    /**
+     * 用「真实字节」验证 MQTT 3.1 —— 手工 new 报文会掩盖解码层的差异:
+     * 协议名必须正好是 {@code MQIsdp} 才会被识别为 3.1, 否则解码器直接抛
+     * {@code MqttUnacceptableProtocolVersionException}。
+     */
+    @Test
+    @DisplayName("MQIsdp / level 3 的线上报文被接受, 回 3.1 形态的 CONNACK")
+    void mqtt31PhysicalPacketAccepted() {
+        EmbeddedChannel channel = new EmbeddedChannel(
+                new MqttDecoder(10 * 1024 * 1024), MqttEncoder.INSTANCE);
+
+        channel.writeInbound(Unpooled.wrappedBuffer(connectBytes("MQIsdp", 3, "legacy-device-001")));
+        MqttConnectMessage decoded = channel.readInbound();
+        assertNotNull(decoded, "3.1 报文必须能被解码");
+        assertFalse(decoded.decoderResult().isFailure(), "MQIsdp + level 3 是合法组合");
+        assertEquals(3, decoded.variableHeader().version());
+
+        handler.processConnect(channel, decoded);
+        authGate.complete(AuthResult.ALLOW);
+        channel.runPendingTasks();
+
+        // pipeline 里挂了 encoder, 所以出站拿到的是编码后的字节(不是 MqttConnAckMessage)
+        ByteBuf wire = channel.readOutbound();
+        assertNotNull(wire, "3.1 必须被接受并回 CONNACK");
+        assertEquals(4, wire.readableBytes(),
+                "3.1/3.1.1 的 CONNACK 恒为 4 字节(没有 v5 的 properties 段), 实际="
+                        + wire.readableBytes());
+        assertEquals(0x20, wire.getByte(0) & 0xFF, "报文类型必须是 CONNACK");
+        assertEquals(0x02, wire.getByte(1) & 0xFF, "remaining length = 2");
+        assertEquals(0x00, wire.getByte(3) & 0xFF, "返回码 CONNECTION_ACCEPTED");
+
+        assertEquals("legacy-device-001", channel.attr(ChannelAttributes.CLIENT_ID).get());
+        assertTrue(connectionRegistry.isOnline("legacy-device-001"), "3.1 连接必须注册");
+        channel.finish();
+    }
+
+    /** 拼一个真实的 CONNECT 报文(MQTT 3.1 / 3.1.1 通用, 只有协议名与级别不同) */
+    private static byte[] connectBytes(String protocolName, int level, String clientId) {
+        byte[] name = protocolName.getBytes(StandardCharsets.UTF_8);
+        byte[] cid = clientId.getBytes(StandardCharsets.UTF_8);
+        java.io.ByteArrayOutputStream body = new java.io.ByteArrayOutputStream();
+        body.write(0);
+        body.write(name.length);
+        body.write(name, 0, name.length);
+        body.write(level);
+        body.write(0x02);            // connect flags: cleanSession
+        body.write(0);
+        body.write(60);              // keepAlive = 60s
+        body.write(0);
+        body.write(cid.length);
+        body.write(cid, 0, cid.length);
+
+        byte[] vh = body.toByteArray();
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        out.write(0x10);             // CONNECT
+        int remaining = vh.length;
+        do {
+            int digit = remaining % 128;
+            remaining /= 128;
+            if (remaining > 0) {
+                digit |= 0x80;
+            }
+            out.write(digit);
+        } while (remaining > 0);
+        out.write(vh, 0, vh.length);
+        return out.toByteArray();
     }
 }

@@ -138,13 +138,20 @@ public class ConnectHandler {
     }
 
     public void processConnect(Channel channel, MqttConnectMessage msg) {
-        // 本分支只服务 MQTT 3.1.1。v5 客户端在入口就拒绝:
-        // 让它在握手阶段拿到明确的「协议版本不支持」, 而不是连上之后
-        // 因为回包形态不匹配而进入难以定位的错位状态。
-        // 其余非法协议级别由 Netty 解码器抛出 MqttUnacceptableProtocolVersionException 拦下。
-        if (msg.variableHeader().version() != ConnectOptions.VERSION_3_1_1) {
-            log.debug("CONNECT 被拒绝: 不支持的协议级别 {} (仅支持 3.1.1)",
-                    msg.variableHeader().version());
+        // 本分支服务 3.1 与 3.1.1 两个协议级别 —— 它们在报文层面几乎一致
+        // (payload 结构相同, 各类回包字节布局相同), 差别只在 3.1 的 clientId 限 23 字符、
+        // 以及 CONNACK bit0 的语义(那一位我们恒为 0, 两种解读下都不产生误判)。
+        // 详情见 {@link ConnectOptions}。
+        //
+        // 真正走不到这里的版本只剩 v5.0。对应用户诉求:「功能不支持, 但不要强硬拒绝」——
+        // 只有「连上之后回包形态必然错位」才值得在握手阶段拒, 其余一律放行。
+        //
+        // 其余非法协议级别(级别与协议名不匹配、未知级别)由 Netty 解码器抛出
+        // MqttUnacceptableProtocolVersionException 拦下, 走 handleDecodeFailure。
+        int protocolLevel = msg.variableHeader().version();
+        if (protocolLevel != ConnectOptions.VERSION_3_1
+                && protocolLevel != ConnectOptions.VERSION_3_1_1) {
+            log.debug("CONNECT 被拒绝: 不支持的协议级别 {} (支持 3.1 / 3.1.1)", protocolLevel);
             nodeMetricsService.connectionRejected("protocol");
             rejectAndClose(channel, ReplyFactory.ConnAckReason.UNSUPPORTED_PROTOCOL_VERSION);
             return;
