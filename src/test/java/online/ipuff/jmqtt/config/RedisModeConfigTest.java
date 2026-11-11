@@ -47,8 +47,8 @@ class RedisModeConfigTest {
                 base.websocketPort(), base.websocketPath(),
                 base.bossThreads(), base.workerThreads(), base.useEpoll(), base.connectRatePerSecond(),
                 base.authEnabled(), base.authUsername(), base.authPassword(),
-                base.defaultKeepAlive(), base.sessionExpirySeconds(), base.topicAliasMaximum(),
-                base.serverKeepAlive(), base.maxInflight(), base.maxMqueueLen(), base.maxOfflineQueueLen(),
+                base.defaultKeepAlive(), base.sessionExpirySeconds(),
+                base.maxInflight(), base.maxMqueueLen(), base.maxOfflineQueueLen(),
                 base.clusterEnabled(), base.kafka(), redis,
                 base.soBacklog(), base.soKeepAlive(), base.tcpNoDelay(), base.maxPayloadSize(),
                 base.writeBufferLowWaterMark(), base.writeBufferHighWaterMark());

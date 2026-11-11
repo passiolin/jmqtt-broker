@@ -15,8 +15,6 @@ package online.ipuff.jmqtt.protocol;
 
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.mqtt.MqttMessageIdVariableHeader;
-import io.netty.handler.codec.mqtt.MqttProperties;
-import io.netty.handler.codec.mqtt.MqttPubReplyMessageVariableHeader;
 import online.ipuff.jmqtt.cluster.InternalSendServer;
 import online.ipuff.jmqtt.handler.ChannelAttributes;
 import online.ipuff.jmqtt.message.DupPublishMessageStore;
@@ -54,19 +52,6 @@ class PubRecHandlerTest {
         handler = new PubRecHandler(dupPublish, dupPubRel, sendServer);
         channel = new EmbeddedChannel();
         channel.attr(ChannelAttributes.CLIENT_ID).set(CLIENT);
-    }
-
-    @Test
-    @DisplayName("v5 客户端拒收(reason>=0x80): 释放标识符, 不发 PUBREL, 不留状态")
-    void v5RejectionReleasesWithoutPubRel() {
-        dupPublish.put(new DupPublishMessageStore(CLIENT, "t/1", 2, 7, new byte[]{1}));
-
-        handler.processPubRec(channel,
-                new MqttPubReplyMessageVariableHeader(7, (byte) 0x87, MqttProperties.NO_PROPERTIES));
-
-        assertEquals(0, dupPublish.get(CLIENT).size(), "在途要释放");
-        assertEquals(0, dupPubRel.get(CLIENT).size(), "不能建幽灵 PUBREL 状态");
-        verify(sendServer).releaseSendWindow(any(), anyInt());
     }
 
     @Test

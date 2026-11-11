@@ -18,8 +18,6 @@ package online.ipuff.jmqtt.protocol;
 import io.netty.channel.Channel;
 import io.netty.handler.codec.mqtt.MqttConnectMessage;
 import io.netty.handler.codec.mqtt.MqttConnectReturnCode;
-import io.netty.handler.codec.mqtt.MqttProperties;
-import io.netty.handler.codec.mqtt.MqttVersion;
 import io.netty.handler.timeout.IdleStateHandler;
 import io.netty.util.CharsetUtil;
 import online.ipuff.jmqtt.admin.AdminStatePublisher;
@@ -51,7 +49,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
-import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -69,28 +66,17 @@ import java.util.concurrent.CompletableFuture;
  *
  * <p>这里改为按「服务端是否真的恢复了会话」计算, 并且只在订阅确实保留时才回 true。
  *
- * <h2>v5 带来的三处结构性变化</h2>
+ * <h2>3.1.1 下仍然成立的三条约束</h2>
  * <ol>
- *   <li><b>版本要记在 Channel 上。</b>回包形态由版本决定, 而回包发生在后续十几处,
- *       所以握手时把版本与解析好的 {@link ConnectOptions} 一起写进 Channel 属性
- *       （见 {@link ChannelAttributes#PROTOCOL_VERSION}）。</li>
- *   <li><b>「保留会话」的判据换了。</b>v3.1.1 是 {@code !cleanSession}, v5 是
- *       Session Expiry Interval &gt; 0 —— 两者并不等价: v5 允许
- *       {@code cleanStart=1} 且 SEI &gt; 0（从零开始建立、建立后保留）。
- *       统一用 {@link SessionStore#isPersistent()}。</li>
- *   <li><b>在途窗口由客户端参与决定。</b>v5 的 Receive Maximum 声明了客户端能同时容纳
- *       多少条未确认的 QoS 1/2, 服务端必须遵守; v3.1.1 没有这个概念, 只受服务端自己的
- *       {@code max-inflight} 约束。取两者最小值。</li>
+ *   <li><b>回包形态不需要再记版本。</b>本分支只有 3.1.1 一种形态, CONNACK/PUBACK/
+ *       UNSUBACK 的字节布局恒定, 不必把版本写到 Channel 上再逐处判断。</li>
+ *   <li><b>「保留会话」判据就等价于 {@code cleanSession}。</b>3.1.1 没有
+ *       Session Expiry Interval, {@code cleanSession=0} 即「断开后保留」。
+ *       代码仍走 {@link SessionStore#isPersistent()}, 但值为 0 只会来自
+ *       {@code cleanSession=1}。</li>
+ *   <li><b>在途窗口只受服务端 {@code max-inflight} 约束。</b>3.1.1 没有客户端侧的
+ *       Receive Maximum 协商。</li>
  * </ol>
- *
- * <h2>v5 能力声明为什么放在 CONNACK 里</h2>
- * v5 的 CONNACK 可以声明服务端支持哪些特性（Maximum QoS / Retain Available /
- * Wildcard Subscription Available / Shared Subscription Available /
- * Subscription Identifiers Available）。<b>用声明代替猜测</b>是这个版本最重要的改进 ——
- * 与其让客户端试了才知道, 不如一次说清。本实现声明:
- * 通配符订阅支持、保留消息支持、QoS 2 支持;
- * 共享订阅与订阅标识符不支持（前者的正确实现牵涉集群路由, 后者的意义在于区分同一条
- * 消息的多次投递, 都需要单独设计）。
  */
 @Component
 public class ConnectHandler {
@@ -163,7 +149,6 @@ public class ConnectHandler {
             rejectAndClose(channel, ReplyFactory.ConnAckReason.UNSUPPORTED_PROTOCOL_VERSION);
             return;
         }
-        channel.attr(ChannelAttributes.PROTOCOL_VERSION).set(MqttVersion.MQTT_3_1_1);
 
         ConnectOptions options = ConnectOptions.parse(msg, properties);
         channel.attr(ChannelAttributes.CONNECT_OPTIONS).set(options);
@@ -283,7 +268,7 @@ public class ConnectHandler {
             }
         }
 
-        // 4) 遗嘱已在挂起前解析(参数传入, 含 v5 的 Will Delay Interval)
+        // 4) 遗嘱已在挂起前解析(参数传入)
 
         // 5) 落库会话
         SessionStore session = (existing != null && !options.cleanSession())
@@ -308,10 +293,10 @@ public class ConnectHandler {
             sessionPersistence.saveSession(session);
         }
 
-        // 6) 心跳: server-keep-alive 覆盖客户端协商值(仅当配置大于 0)
-        int keepAlive = properties.serverKeepAlive() > 0
-                ? properties.serverKeepAlive()
-                : requestedKeepAlive;
+        // 6) 心跳: 3.1.1 没有 Server Keep Alive 属性, 服务端无法改写客户端声明的值 ——
+        //    只能沿用 CONNECT 里的协商结果。要收紧死连接占用, 得靠服务端自己的
+        //    空闲检测(见 configureKeepAlive 里的宽限系数), 而不是改这个值。
+        int keepAlive = requestedKeepAlive;
         configureKeepAlive(channel, keepAlive);
 
         // 7) 注册连接, 并踢掉同一 clientId 的旧连接(连接接管)
@@ -322,8 +307,8 @@ public class ConnectHandler {
         channel.attr(ChannelAttributes.KEEP_ALIVE).set(keepAlive);
         // 发送缓冲挂在 Channel 上: 它的生命周期就是这条连接, 随连接自动回收。
         // 必须在任何投递发生之前装配好, 否则投递会走「未装配缓冲」的退化路径。
-        // 窗口取服务端与客户端声明的较小值 —— v5 的 Receive Maximum 是客户端侧流控
-        int window = Math.max(1, Math.min(properties.maxInflight(), options.receiveMaximum()));
+        // 窗口只由服务端 max-inflight 决定 —— 3.1.1 没有客户端侧的流控协商
+        int window = Math.max(1, properties.maxInflight());
         channel.attr(ChannelAttributes.SEND_BUFFER).set(new SendBuffer(
                 window, properties.maxMqueueLen(), backpressureMetrics));
         Channel previous = connectionRegistry.register(clientId, channel);
@@ -365,7 +350,7 @@ public class ConnectHandler {
 
         // 9) 恢复投递: 在途重发 + 离线积压。
         //    门控是「服务端确实持有旧会话」而不是「会话是否持久」——
-        //    v5 的 Clean Start=0 省略 Session Expiry Interval(默认 0)时会话照旧要恢复,
+        //    cleanSession=0 时只要服务端还有会话状态就必须恢复,
         //    SEI 只决定连接关闭后会话活多久([MQTT-3.1.2-4])。
         //    用 isPersistent() 门控会让这类客户端拿到 sessionPresent=true 却什么都收不到。
         if (sessionPresent) {
@@ -376,17 +361,6 @@ public class ConnectHandler {
             //     放在重发未确认消息之后: 先补齐已发出的, 再补未发出的, 顺序更贴近真实时序。
             internalSendServer.deliverPendingMessages(clientId, channel);
         }
-    }
-
-    private static void addInt(MqttProperties props, MqttProperties.MqttPropertyType type, long value) {
-        props.add(new MqttProperties.IntegerProperty(type.value(), (int) value));
-    }
-
-    /**
-     * 服务端分配 clientId。带 broker 前缀便于在日志里定位是谁分配的。
-     */
-    private String generateClientId() {
-        return properties.id() + "-" + UUID.randomUUID().toString().substring(0, 12);
     }
 
     /**
@@ -409,7 +383,7 @@ public class ConnectHandler {
      * 通知旧节点释放该 clientId 的连接。
      *
      * <p>MQTT 规范要求: 同一 clientId 已有连接时, 服务端必须断开既有连接
-     * （v3.1.1 [MQTT-3.1.4-2] / v5 [MQTT-3.1.4-3]）。
+     * （[MQTT-3.1.4-2]）。
      * 单节点内这件事由 {@code ConnectionRegistry.register} 顺手完成; 跨节点则必须显式通知 ——
      * 否则旧节点上的连接会一直存活到它自己的心跳超时(可能几分钟)。
      * 这期间同一个 clientId 在两个节点上同时在线, 表现为共享订阅重复投递、
@@ -497,9 +471,7 @@ public class ConnectHandler {
     }
 
     /**
-     * 构造遗嘱消息。v5 的 will properties 单独存放, 这里只取 Will Delay Interval
-     * 交由 {@link WillMessage} 携带 —— 延迟投递的实际调度是独立课题（需要一个定时器,
-     * 且要与会话过期回收的职责划分清楚), 当前不做, 但值必须解析出来, 否则会丢失语义。
+     * 构造遗嘱消息。3.1.1 的遗嘱没有延迟投递语义: 异常断连即刻发布。
      */
     private WillMessage extractWillMessage(MqttConnectMessage msg, ConnectOptions options) {
         if (!msg.variableHeader().isWillFlag()) {

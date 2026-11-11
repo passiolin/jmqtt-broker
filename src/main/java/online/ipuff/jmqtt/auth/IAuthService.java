@@ -31,7 +31,7 @@ public interface IAuthService {
     /**
      * 认证一个 CONNECT。
      *
-     * @param clientId 客户端标识(v5 下可能是服务端刚分配的)
+     * @param clientId 客户端标识(3.1.1 要求非空)
      * @param username 客户端提交的用户名, 可能为 null
      * @param password 客户端提交的密码(UTF-8 解码), 可能为 null
      * @param peerhost 对端 IP, 可能为 null(如 EmbeddedChannel); 认证服务常按来源网段放行

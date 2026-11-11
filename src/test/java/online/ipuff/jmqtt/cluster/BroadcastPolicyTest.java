@@ -129,7 +129,7 @@ class BroadcastPolicyTest {
                 "node-1", null, 1883, true, 8083, "/mqtt",
                 1, 2, false, 4096,
                 false, "jmqtt", "jmqtt",
-                60, 7200, 0, 0, 32, 1000, 1000,
+                60, 7200, 32, 1000, 1000,
                 true, kafka,
                 new BrokerProperties.RedisProperties(false, "127.0.0.1", 6379, null, 0,
                         "jmqtt", 604800, 1000, 5000, "off", 100, 10000, "standalone", null, null),

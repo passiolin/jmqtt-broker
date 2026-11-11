@@ -75,7 +75,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *
  * <h2>核心策略: 只有保留会话才写镜像</h2>
  * 镜像存在的唯一目的是<b>重连时恢复</b>, 而非保留会话(v3.1.1 {@code cleanSession=1},
- * v5 Session Expiry=0)断开后既不会重发在途、也不会有离线积压 ——
+ * 保留时长为 0)断开后既不会重发在途、也不会有离线积压 ——
  * 给它们写镜像永远不会被读回来, 白费 Redis 写入与刷盘槽位。
  * 绝大多数 IoT 设备恰恰用的是 cleanSession=1, 这个判断与
  * {@code SessionPersistence} 的「只有保留会话才落盘」是同一条策略。
@@ -210,7 +210,7 @@ public class InflightPersistence {
      * 镜像会被删除。
      *
      * <p><b>非空快照只给保留会话写。</b>判据是 {@link SessionStore#isPersistent()}
-     * (保留时长 &gt; 0), 不是 cleanSession 位 —— v5 下 {@code cleanStart=1 && SEI>0}
+     * (保留时长 &gt; 0), 不是 cleanSession 位 —— 保留时长是回收逻辑维护的真源
      * 的会话从零建立但断开后要保留, 也得写。这一过滤同时堵住一个规范偏差:
      * cleanSession=1 的客户端在连接期间写的镜像, 会在节点崩溃后客户端改以
      * {@code cleanSession=0} 重连时被误当作可恢复状态载入重发 —— 而规范要求

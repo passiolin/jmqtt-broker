@@ -91,7 +91,7 @@ public final class TestBrokerProperties {
                 nodeId, null, 1883, true, 8083, "/mqtt",
                 1, 2, false, 4096,
                 authEnabled, authUsername, authPassword,
-                60, 7200, 0, 0, maxInflight, 1000, maxOfflineQueueLen,
+                60, 7200, maxInflight, 1000, maxOfflineQueueLen,
                 false, kafka, redis,
                 511, true, true, 10485760, 32768, 65536);
     }

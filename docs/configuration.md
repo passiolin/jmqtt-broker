@@ -27,9 +27,9 @@ jmqtt:
     auth-username: jmqtt
     auth-password: jmqtt         # 建议改为 sha256:<hex>
     default-keep-alive: 60
-    session-expiry-seconds: 7200 # 会话保留时长; v5 下同时是 Session Expiry Interval 的封顶值
-    topic-alias-maximum: 0       # v5: 接受的入站 topic alias 上限。0 = 不支持(会在 CONNACK 声明)
-    server-keep-alive: 0         # v5: 服务端强制心跳(秒)。0 = 不干预, 沿用客户端协商值
+    session-expiry-seconds: 7200 # 会话保留时长(cleanSession=0 时生效)
+    # 心跳只认 CONNECT 里的协商值 —— 3.1.1 没有 Server Keep Alive 属性,
+    # 服务端无法改写它, 只能在空闲检测上加宽限(keepAlive × 1.5)
     max-payload-size: 10485760   # 单报文上限 10MB
     cluster-enabled: false       # 集群开关
     kafka:

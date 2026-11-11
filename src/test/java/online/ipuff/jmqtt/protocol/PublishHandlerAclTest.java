@@ -135,15 +135,12 @@ class PublishHandlerAclTest {
     private EmbeddedChannel publisherChannel(boolean v5) {
         EmbeddedChannel channel = new EmbeddedChannel();
         channel.attr(ChannelAttributes.CLIENT_ID).set(PUB);
-        channel.attr(ChannelAttributes.PROTOCOL_VERSION)
-                .set(v5 ? MqttVersion.MQTT_5 : MqttVersion.MQTT_3_1_1);
         return channel;
     }
 
     private EmbeddedChannel subscriberChannel() {
         EmbeddedChannel channel = new EmbeddedChannel();
         channel.attr(ChannelAttributes.CLIENT_ID).set(SUB);
-        channel.attr(ChannelAttributes.PROTOCOL_VERSION).set(MqttVersion.MQTT_5);
         channel.attr(ChannelAttributes.SEND_BUFFER).set(new SendBuffer(32, 1000, new BackpressureMetrics()));
         subscribeStoreService.put(new SubscribeStore(SUB, "sensor/#", 0));
         // 投递按 ConnectionRegistry 找通道 —— 没注册就等于订阅者离线

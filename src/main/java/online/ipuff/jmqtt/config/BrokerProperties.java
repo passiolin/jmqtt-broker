@@ -59,23 +59,6 @@ public record BrokerProperties(
 
         @Min(0) int defaultKeepAlive,
         @Min(0) long sessionExpirySeconds,
-        /**
-         * v5: 服务端可接受的<b>入站</b> topic alias 数量上限。
-         *
-         * <p>本实现不做入站别名(别名需要为每条连接维护一张 alias→topic 映射,
-         * 还要处理「未知别名」「空主题名 + 别名」这些错误路径), 因此默认为 0,
-         * 并在 CONNACK 里如实声明 —— 客户端看到 0 就不会使用别名。
-         * 比「声明支持然后悄悄忽略」安全得多。
-         */
-        @Min(0) int topicAliasMaximum,
-        /**
-         * 服务端强制的心跳间隔(秒)。0 表示不干预, 沿用客户端协商值。
-         *
-         * <p>置为非 0 时会在 CONNACK 里回 {@code Server Keep Alive} 属性,
-         * 客户端<b>必须</b>改用该值发送心跳。用途是把心跳下限握在服务端手里 ——
-         * 否则一个客户端声明 keepAlive=600 就能让死连接占着资源十分钟。
-         */
-        @Min(0) int serverKeepAlive,
         @Min(1) int maxInflight,
         @Min(1) int maxMqueueLen,
         /**

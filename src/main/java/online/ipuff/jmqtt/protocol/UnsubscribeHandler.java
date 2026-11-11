@@ -31,7 +31,7 @@ import java.util.List;
  * <h2>UNSUBACK 的形态</h2>
  * 3.1.1 的 UNSUBACK <b>必须没有 payload</b>, 只带报文标识符。
  * 带上 payload 属于协议错误, 严格的客户端会直接断开。
- * 逐项取消结果（v5 才有的语义）这里只记日志, 不进报文。
+ * 逐项取消结果在 3.1.1 的报文里没有位置, 这里只记日志。
  */
 @Component
 public class UnsubscribeHandler {

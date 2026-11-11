@@ -115,8 +115,6 @@ class SubscribeHandlerAclTest {
     private EmbeddedChannel clientChannel(boolean v5) {
         EmbeddedChannel channel = new EmbeddedChannel();
         channel.attr(ChannelAttributes.CLIENT_ID).set("client-1");
-        channel.attr(ChannelAttributes.PROTOCOL_VERSION)
-                .set(v5 ? MqttVersion.MQTT_5 : MqttVersion.MQTT_3_1_1);
         return channel;
     }
 

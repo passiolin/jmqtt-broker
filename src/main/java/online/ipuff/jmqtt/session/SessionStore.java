@@ -40,9 +40,9 @@ public class SessionStore {
     /**
      * CONNECT 时客户端要求「丢弃既有会话」。
      *
-     * <p>v3.1.1 里叫 {@code cleanSession}, v5 里叫 {@code cleanStart} —— 语义相同。
+     * <p>3.1.1 的 {@code cleanSession} 位。
      * <b>注意它只描述「本次连接怎么开始」, 不描述「断开后留不留」</b>:
-     * v5 允许 {@code cleanStart=1} 且 Session Expiry Interval &gt; 0,
+     * 保留时长与它是两件事: {@code cleanSession=1} 只决定「连接时丢弃旧会话」,
      * 即从零开始建立、但建立之后要保留。所以判断「要不要保留」一律用
      * {@link #isPersistent()}, 不要用这个字段。
      */
@@ -51,7 +51,7 @@ public class SessionStore {
     /**
      * 会话保留时长(秒); 0 表示不保留。
      *
-     * <p>不是 final: v5 允许客户端在 DISCONNECT 时改写它（只能减小），
+     * <p>不是 final: 会话过期回收集在运行期改写它，
      * 所以连接建立之后它仍可能变化。
      */
     private volatile long expireSeconds;
@@ -69,7 +69,7 @@ public class SessionStore {
      * 连接关闭时刻(epoch millis); {@code null} 表示仍在线。
      *
      * <p><b>会话过期从「断开」起算, 不从「最后活跃」起算</b> ——
-     * 过期语义是「连接关闭后再保留多久」(v5 §4.1 / v3.1.1 [MQTT-3.1.2-6])。
+     * 过期语义是「连接关闭后再保留多久」(3.1.1 [MQTT-3.1.2-6])。
      * 用最后活跃时间(只有 PINGREQ 刷新)会两个方向都错:
      * 在线但不发心跳的客户端被当成过期回收, 离线客户端又提前过期。
      */
@@ -144,14 +144,13 @@ public class SessionStore {
     /**
      * 会话是否需要保留 —— 断开后继续存在、要落盘、要接收离线消息。
      *
-     * <p><b>判据只有一个: 保留时长 &gt; 0。</b>这样一个判断同时覆盖两个版本的语义:
-     * <ul>
-     *   <li>v3.1.1: {@code cleanSession=1} 被翻译成保留时长 0, {@code =0} 被翻译成配置的默认时长</li>
-     *   <li>v5: Session Expiry Interval 直接就是保留时长, 0 即「断开即销毁」</li>
-     * </ul>
-     * 之所以不能用 {@code !cleanSession} 代劳: v5 存在
-     * {@code cleanStart=1 && SessionExpiryInterval>0} 这种组合 ——
-     * 会话从零开始, 但建立之后要按 SEI 保留。用 cleanStart 判会把它误判成「不保留」。
+     * <p><b>判据只有一个: 保留时长 &gt; 0。</b>3.1.1 里 {@code cleanSession=1} 被翻译成
+     * 保留时长 0, {@code =0} 被翻译成配置的默认时长, 所以本判据与
+     * {@code !cleanSession} 等价。
+     *
+     * <p>仍用「保留时长」而不是直接读 {@code cleanSession}: 会话的保留时长可以由服务端
+     * 回收逻辑在不改标志位的情况下改写(见 {@link #setExpireSeconds}), 而真正决定
+     * 「要不要落盘、要不要收离线消息」的是时长本身。
      */
     public boolean isPersistent() {
         return expireSeconds > 0;
@@ -162,7 +161,7 @@ public class SessionStore {
     }
 
     /**
-     * 改写会话保留时长。仅用于 v5 的 DISCONNECT 覆盖, 调用方负责校验只能减小。
+     * 改写会话保留时长(会话过期回收使用)。
      */
     public void setExpireSeconds(long expireSeconds) {
         this.expireSeconds = expireSeconds;

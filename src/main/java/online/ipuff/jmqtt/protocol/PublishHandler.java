@@ -17,7 +17,6 @@ package online.ipuff.jmqtt.protocol;
 
 import io.netty.buffer.ByteBufUtil;
 import io.netty.channel.Channel;
-import io.netty.handler.codec.mqtt.MqttProperties;
 import io.netty.handler.codec.mqtt.MqttPublishMessage;
 import io.netty.handler.codec.mqtt.MqttQoS;
 import online.ipuff.jmqtt.admin.TopicCaptureService;
@@ -222,10 +221,8 @@ public class PublishHandler {
 
         // 按 QoS 应答。
         //
-        // 原因码恒为 SUCCESS, 这里刻意不使用 v5 的 0x10 No matching subscribers:
-        // 本方法只知道<b>本地</b>投递了几条, 而消息还会经集群总线发往其他节点。
-        // 在集群模式下报「无匹配订阅者」会是错的信号 —— 客户端据此可能以为消息没人要。
-        // 只有在能确定「全局都没有订阅者」时才谈得上用这个码, 那需要总线回执, 属后续项。
+        // 3.1.1 的 PUBACK 只有报文标识符, 没有原因码 —— 即使本地没有匹配的订阅者
+        // 也照常回确认。这也是该版本的一个已知局限: 客户端无法区分「有人收」与「没人收」。
         if (qos == MqttQoS.AT_LEAST_ONCE.value()) {
             channel.writeAndFlush(ReplyFactory.pubAck(packetId));
         } else if (qos == MqttQoS.EXACTLY_ONCE.value()) {

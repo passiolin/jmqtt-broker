@@ -177,7 +177,7 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
             case PUBCOMP -> protocolProcessor.pubComp()
                     .processPubComp(channel, (MqttMessageIdVariableHeader) msg.variableHeader());
             case PINGREQ -> protocolProcessor.pingReq().processPingReq(channel, msg);
-            // DISCONNECT 必须把整条报文传下去: v5 的可变头里带原因码,
+            // DISCONNECT 把整条报文传下去: 保留完整报文便于异常时打印原始形态,
             // 以及可选的 Session Expiry Interval 改写请求 —— 只看类型会把这些丢掉
             case DISCONNECT -> protocolProcessor.disconnect().processDisconnect(channel, msg);
             default -> log.debug("忽略报文类型: {}", msg.fixedHeader().messageType());

@@ -15,8 +15,6 @@ package online.ipuff.jmqtt.protocol;
 
 import io.netty.channel.Channel;
 import io.netty.handler.codec.mqtt.MqttMessage;
-import io.netty.handler.codec.mqtt.MqttProperties;
-import io.netty.handler.codec.mqtt.MqttReasonCodeAndPropertiesVariableHeader;
 import online.ipuff.jmqtt.handler.ChannelAttributes;
 import online.ipuff.jmqtt.session.ISessionStoreService;
 import online.ipuff.jmqtt.session.SessionLifecycle;
@@ -32,30 +30,17 @@ import org.springframework.stereotype.Component;
  *   <li>会话需要保留 → 保留会话与订阅, 等待客户端重连</li>
  *   <li>会话不需要保留 → 会话及相关状态全部清除</li>
  * </ul>
- * 「需不需要保留」用 {@link SessionStore#isPersistent()}, 不按版本分支 —— v5 下
- * {@code cleanStart} 与「断开后留不留」不是同一件事。
+ * 「需不需要保留」用 {@link SessionStore#isPersistent()}。
  *
  * <p><b>正常断开不触发遗嘱</b>: 这里先把会话里的 will 清空, 再关闭连接,
  * 使随后的 {@code channelInactive} 判定为非遗嘱场景。
- * 遗嘱只在<b>异常断连</b>(心跳超时、连接被重置)时触发。
- * 例外是 v5 的原因码 {@code 0x04 Disconnect with Will Message} ——
- * 客户端明确要求「断开并发布遗嘱」, 这时的正确行为恰好相反: <b>保留 will</b>。
- *
- * <h2>v5 的会话保留时长可以在断开时改写</h2>
- * CONNECT 里给的 Session Expiry Interval 不是最终值 —— v5 允许客户端在 DISCONNECT
- * 时用一个同名属性把它改掉（常见用法: 连的时候给一个较大的值以便断线重连,
- * 主动下线时改成 0, 让服务端立刻清掉会话）。
- *
- * <p>但规范限定只能<b>减小</b>（[MQTT-3.14.2-2]: 连接时是 0 就不允许在断开时调大）——
- * 调大意味着客户端想让服务端多留一段自己都没承诺过的时间。这里按协议错误断开。
+ * 遗嘱只在<b>异常断连</b>(心跳超时、连接被重置)时触发 —— 3.1.1 没有
+ * 「断开并发布遗嘱」这类原因码, 主动 DISCONNECT 一律视为正常下线。
  */
 @Component
 public class DisconnectHandler {
 
     private static final Logger log = LoggerFactory.getLogger(DisconnectHandler.class);
-
-    /** v5: Disconnect with Will Message —— 断开并发布遗嘱 */
-    private static final int REASON_DISCONNECT_WITH_WILL = 0x04;
 
     private final ISessionStoreService sessionStoreService;
     private final SessionLifecycle sessionLifecycle;
@@ -85,74 +70,21 @@ public class DisconnectHandler {
         // 标记优雅离线: channelInactive 据此把下线原因写成 disconnect 而不是 closed
         channel.attr(ChannelAttributes.GRACEFUL_DISCONNECT).set(Boolean.TRUE);
 
-        int reasonCode = reasonCode(msg);
-        boolean publishWill = reasonCode == REASON_DISCONNECT_WITH_WILL;
-
         SessionStore session = sessionStoreService.get(clientId);
-
-        // v5: 断开时可改写会话保留时长(只能减小)
-        Long requestedExpiry = requestedSessionExpiry(msg);
-        if (requestedExpiry != null && session != null) {
-            if (session.getExpireSeconds() == 0 && requestedExpiry > 0) {
-                log.warn("v5 DISCONNECT 试图把会话保留时长从 0 调大, clientId={} 请求={}s, 按协议错误处理",
-                        clientId, requestedExpiry);
-                ReplyFactory.closeWithReason(channel, "PROTOCOL_ERROR");
-                return;
-            }
-            long previous = session.getExpireSeconds();
-            long capped = requestedExpiry < 0
-                    ? previous
-                    : Math.min(requestedExpiry, previous);
-            session.setExpireSeconds(capped);
-            log.debug("v5 DISCONNECT 改写会话保留时长: clientId={} {}s -> {}s",
-                    clientId, previous, capped);
-        }
-
         boolean persistent = session != null && session.isPersistent();
 
         if (!persistent) {
             // 不保留的会话没有持久化价值, 连同内存与持久层一起清掉
             sessionLifecycle.destroy(clientId);
         } else {
-            // 保留会话与订阅。正常情况下清掉遗嘱(正常断开不该发遗嘱),
-            // 除非客户端明确要求「断开并发布遗嘱」
-            if (!publishWill) {
-                session.setWillMessage(null);
-            }
+            // 保留会话与订阅。正常断开不该发遗嘱, 先把 will 清掉再落库
+            session.setWillMessage(null);
             // 记录关闭时刻(过期从现在起算)并落库
             sessionLifecycle.connectionClosed(clientId);
         }
 
-        log.debug("DISCONNECT clientId={} reasonCode=0x{} 保留会话={}",
-                clientId, Integer.toHexString(reasonCode), persistent);
+        log.debug("DISCONNECT clientId={} 保留会话={}", clientId, persistent);
         channel.close();
     }
 
-    /**
-     * 3.1.1 的 DISCONNECT 没有可变头, 语义恒为「正常断开」。
-     * 保留这个方法是为了让调用点不必改变形态。
-     */
-    private int reasonCode(MqttMessage msg) {
-        return 0;
-    }
-
-    /**
-     * DISCONNECT 里的 Session Expiry Interval 改写请求; 未声明时返回 null。
-     */
-    private Long requestedSessionExpiry(MqttMessage msg) {
-        if (!(msg.variableHeader() instanceof MqttReasonCodeAndPropertiesVariableHeader v5Header)) {
-            return null;
-        }
-        MqttProperties properties = v5Header.properties();
-        if (properties == null || properties == MqttProperties.NO_PROPERTIES) {
-            return null;
-        }
-        MqttProperties.MqttProperty property = properties.getProperty(
-                MqttProperties.MqttPropertyType.SESSION_EXPIRY_INTERVAL.value());
-        if (property instanceof MqttProperties.IntegerProperty integer) {
-            // 0xFFFFFFFF 会以 -1 的形式读出来, 表示「永不过期」→ 取服务端上限
-            return integer.value() < 0 ? Long.MAX_VALUE : (long) integer.value();
-        }
-        return null;
-    }
 }

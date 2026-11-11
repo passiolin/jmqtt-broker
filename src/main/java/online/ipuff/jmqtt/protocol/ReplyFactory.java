@@ -22,15 +22,12 @@ import io.netty.handler.codec.mqtt.MqttMessage;
 import io.netty.handler.codec.mqtt.MqttMessageFactory;
 import io.netty.handler.codec.mqtt.MqttMessageIdVariableHeader;
 import io.netty.handler.codec.mqtt.MqttMessageType;
-import io.netty.handler.codec.mqtt.MqttPubReplyMessageVariableHeader;
-import io.netty.handler.codec.mqtt.MqttProperties;
 import io.netty.handler.codec.mqtt.MqttPublishMessage;
 import io.netty.handler.codec.mqtt.MqttPublishVariableHeader;
 import io.netty.handler.codec.mqtt.MqttQoS;
 import io.netty.handler.codec.mqtt.MqttSubAckMessage;
 import io.netty.handler.codec.mqtt.MqttSubAckPayload;
 import io.netty.handler.codec.mqtt.MqttUnsubAckMessage;
-import io.netty.handler.codec.mqtt.MqttVersion;
 
 import java.util.List;
 
@@ -76,16 +73,6 @@ public final class ReplyFactory {
     }
 
     private ReplyFactory() {
-    }
-
-    /**
-     * 该连接协商的协议版本 —— 恒为 3.1.1。
-     *
-     * <p>保留这个方法是为了让「取版本」的调用点不必改写；v5 客户端已在
-     * {@link ConnectHandler} 入口被拒绝，不会走到任何报文构造路径。
-     */
-    public static MqttVersion versionOf(Channel channel) {
-        return MqttVersion.MQTT_3_1_1;
     }
 
     // ------------------------------------------------------------------

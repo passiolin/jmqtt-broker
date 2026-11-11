@@ -158,7 +158,6 @@ class MqttBrokerHandlerLogTest {
         MqttVersion v = MqttVersion.MQTT_5;
         EmbeddedChannel channel = new EmbeddedChannel();
         channel.attr(ChannelAttributes.CLIENT_ID).set("app:PAD-1");
-        channel.attr(ChannelAttributes.PROTOCOL_VERSION).set(v);
         MqttMessage ping = new MqttMessage(new MqttFixedHeader(
                 MqttMessageType.PINGREQ, false, MqttQoS.AT_MOST_ONCE, false, 0));
         String line = MqttBrokerHandler.describeInbound(channel, ping);

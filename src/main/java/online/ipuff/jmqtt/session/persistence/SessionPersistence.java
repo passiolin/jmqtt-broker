@@ -163,7 +163,7 @@ public class SessionPersistence {
             return false;
         }
         SessionStore session = runtimeSessions.get(clientId);
-        // 判据是「是否保留」而不是「是否 cleanSession」—— v5 下两者不等价, 见 SessionStore#isPersistent
+        // 判据是「是否保留」而不是「是否 cleanSession」, 见 SessionStore#isPersistent
         return session != null && session.isPersistent();
     }
 }

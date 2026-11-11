@@ -107,15 +107,7 @@ jmqtt:
     # 默认心跳时间(秒), 会被客户端 CONNECT 参数覆盖
     default-keep-alive: 60
     # cleanSession=0 的会话保留时长(秒)
-    # v5 下同时是 Session Expiry Interval 的封顶值: 客户端要得更长也只会拿到这个值,
-    # 且服务端必须把实际采用的值回在 CONNACK 里
     session-expiry-seconds: 7200
-    # v5: 可接受的入站 topic alias 数量上限。0 = 不支持(本实现如此),
-    # 会在 CONNACK 里如实声明, 客户端看到 0 就不会使用别名
-    topic-alias-maximum: 0
-    # 服务端强制的心跳间隔(秒)。0 = 不干预, 沿用客户端协商值;
-    # 非 0 时会在 CONNACK 回 Server Keep Alive, 客户端必须遵守
-    server-keep-alive: 0
     # 单个 clientId 允许的最大在途消息数(QoS 1/2)
     max-inflight: 32
     # 单客户端发送队列上限, 超出按 QoS 分级丢弃

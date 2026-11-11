@@ -15,7 +15,6 @@ package online.ipuff.jmqtt.protocol;
 
 import io.netty.channel.Channel;
 import io.netty.handler.codec.mqtt.MqttMessageIdVariableHeader;
-import io.netty.handler.codec.mqtt.MqttPubReplyMessageVariableHeader;
 import online.ipuff.jmqtt.cluster.InternalSendServer;
 import online.ipuff.jmqtt.handler.ChannelAttributes;
 import online.ipuff.jmqtt.message.DupPubRelMessageStore;
@@ -55,18 +54,6 @@ public class PubRecHandler {
         }
         int messageId = variableHeader.messageId();
 
-        // v5 的 PUBREC 可以带原因码: >= 0x80 表示客户端<b>拒绝</b>了这条消息。
-        // [MQTT-4.3.3]: 释放报文标识符, 不得发送 PUBREL —— 继续走正常流程会让
-        // 客户端收到不该收的 PUBREL, 服务端还留下一条永不闭环的幽灵在途状态
-        if (variableHeader instanceof MqttPubReplyMessageVariableHeader reply
-                && (reply.reasonCode() & 0xFF) >= 0x80) {
-            log.debug("客户端拒绝 QoS 2 消息, 释放标识符不发 PUBREL: clientId={} messageId={} reason=0x{}",
-                    clientId, messageId, Integer.toHexString(reply.reasonCode() & 0xFF));
-            dupPublishMessageStoreService.remove(clientId, messageId);
-            internalSendServer.releaseSendWindow(channel, messageId);
-            return;
-        }
-
         if (!dupPublishMessageStoreService.contains(clientId, messageId)) {
             // 指向未知标识符的 PUBREC: 本端没有对应的在途 PUBLISH。
             // 照常回 PUBREL 会让每个伪造标识符都变成一条只在 PUBCOMP 才清除的
@@ -82,7 +69,6 @@ public class PubRecHandler {
         // 之后的 PUBREL/PUBCOMP 走的是另一个流程, 不再占用发送窗口。
         internalSendServer.releaseSendWindow(channel, messageId);
 
-        // 回包形态按连接协商的版本决定(v5 要带原因码 + properties)
         channel.writeAndFlush(ReplyFactory.pubRel(messageId));
         log.trace("PUBREC clientId={} messageId={}", clientId, messageId);
     }

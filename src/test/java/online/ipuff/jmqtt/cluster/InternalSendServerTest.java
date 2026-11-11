@@ -352,7 +352,7 @@ class InternalSendServerTest {
                 PROP_NODE, null, 1883, true, 8083, "/mqtt",
                 1, 2, false, 4096,
                 false, "jmqtt", "jmqtt",
-                60, 7200, 0, 0, 32, 1000, offlineQueueLen,
+                60, 7200, 32, 1000, offlineQueueLen,
                 false, kafka, redis,
                 511, true, true, 10485760, 32768, 65536);
     }

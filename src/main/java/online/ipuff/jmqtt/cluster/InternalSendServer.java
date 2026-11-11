@@ -119,8 +119,8 @@ public class InternalSendServer {
             String subscriberId = sub.clientId();
 
             // 不排除发布者自身: loopback(自发自收)是 MQTT 的合法且必须投递的语义。
-            // "No Local" 是 v5 的订阅选项且默认关闭 —— 此前按 clientId 全局排除发布者,
-            // 导致订阅了自己发布主题的客户端永远收不到消息(违背规范)。
+            // 3.1.1 没有 "No Local" 订阅选项, 发布者自身若也订阅了该主题就必须收到,
+            // 此前按 clientId 全局排除发布者的做法会让它永远收不到(违背规范)。
             // 集群下也不会双投: 本节点投完后, 总线回环由消费端的 brokerId 自查拦住。
 
             // 投递 QoS 取发布 QoS 与订阅 QoS 的较小值
@@ -209,7 +209,7 @@ public class InternalSendServer {
         }
         SessionStore session = sessionStoreService.get(clientId);
         // 判据是「会话是否保留」而不是「是否 cleanSession」——
-        // v5 允许 cleanStart=1 且 Session Expiry Interval>0, 那种会话要保留、也该缓存离线消息
+        // 判据是「会话是否保留」而不是「是否 cleanSession」—— 保留时长由服务端回收逻辑维护
         if (session == null || !session.isPersistent()) {
             return;
         }
@@ -287,8 +287,8 @@ public class InternalSendServer {
     }
 
     /**
-     * 写出 PUBLISH。<b>必须经 {@link ReplyFactory}</b> —— v5 连接的可变头里要有
-     * properties 长度字段, 少了它客户端会把 payload 首字节当成 properties 长度而整体错位。
+     * 写出 PUBLISH。<b>必须经 {@link ReplyFactory}</b> —— 出站报文的形态只在那里定义一次,
+     * 各处自己拼 fixedHeader 迟早会漏字段。
      */
     private void writePublish(Channel channel, String topic, byte[] payload, int packetId,
                               int qos, boolean retain, boolean dup) {

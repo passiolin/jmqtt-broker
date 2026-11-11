@@ -14,7 +14,6 @@
 package online.ipuff.jmqtt.handler;
 
 import io.netty.channel.Channel;
-import io.netty.handler.codec.mqtt.MqttVersion;
 import io.netty.util.AttributeKey;
 import online.ipuff.jmqtt.protocol.ConnectOptions;
 import online.ipuff.jmqtt.session.SendBuffer;
@@ -41,21 +40,9 @@ public final class ChannelAttributes {
     public static final AttributeKey<SendBuffer> SEND_BUFFER = AttributeKey.valueOf("jmqtt.sendBuffer");
 
     /**
-     * 协商出的协议版本(v3.1.1 / v5)。
+     * CONNECT 解析出的连接选项(会话保留时长、发送窗口)。
      *
-     * <p>我们<b>自己记一份</b>, 而不是复用 Netty 内部的同名属性 ——
-     * Netty 把那个 key 定义成包级私有({@code MqttCodecUtil.MQTT_VERSION_KEY}),
-     * 应用代码读不到。注意 Netty 的编码器也按它自己的属性决定编包格式,
-     * 那份由 {@code MqttDecoder} 在解出 CONNECT 后自动写入, 两者必须一致
-     * （不一致就会出现「按 v5 构造报文、按 v3 编码」的坏字节）。见 {@code ReplyFactory.versionOf}。
-     */
-    public static final AttributeKey<MqttVersion> PROTOCOL_VERSION =
-            AttributeKey.valueOf("jmqtt.protocolVersion");
-
-    /**
-     * CONNECT 解析出的连接选项(会话保留时长、Receive Maximum、最大报文等)。
-     *
-     * <p>握手时写入一次, 之后只读。有了它, 后续处理器不必再回头解析 CONNECT 的 v5 属性。
+     * <p>握手时写入一次, 之后只读。有了它, 后续处理器不必再回头解析 CONNECT 报文。
      */
     public static final AttributeKey<ConnectOptions> CONNECT_OPTIONS =
             AttributeKey.valueOf("jmqtt.connectOptions");
@@ -71,7 +58,7 @@ public final class ChannelAttributes {
     public static final AttributeKey<Long> CONNECTED_AT = AttributeKey.valueOf("jmqtt.connectedAt");
 
     /**
-     * 协商后的心跳间隔(秒)。已经过 {@code server-keep-alive} 覆盖, 即真实生效值。
+     * 协商后的心跳间隔(秒), 即 CONNECT 报文里客户端声明的值。
      */
     public static final AttributeKey<Integer> KEEP_ALIVE = AttributeKey.valueOf("jmqtt.keepAlive");
 

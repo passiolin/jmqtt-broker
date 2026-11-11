@@ -556,9 +556,6 @@ class ClusterBusTest {
                 "jmqtt",
                 60,
                 7200,
-                // v5 新增: 不接受入站 topic alias / 不强制心跳
-                0,
-                0,
                 32,
                 1000,
                 1000,

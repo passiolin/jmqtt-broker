@@ -563,11 +563,8 @@ public class AdminStatePublisher {
         if (channel.remoteAddress() != null) {
             view.put("addr", channel.remoteAddress().toString());
         }
-        ConnectOptions options = channel.attr(ChannelAttributes.CONNECT_OPTIONS).get();
-        if (options != null) {
-            view.put("ver", 4);
-            view.put("receiveMax", options.receiveMaximum());
-        }
+        // 协议版本恒为 4(3.1.1); 保留这个字段是为了让管理面 schema 不变
+        view.put("ver", 4);
         view.put("keepAlive", attr(channel, ChannelAttributes.KEEP_ALIVE, 0));
         view.put("connectedAt", attr(channel, ChannelAttributes.CONNECTED_AT, 0L));
 

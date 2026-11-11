@@ -84,7 +84,7 @@ public class SessionLifecycle {
      * 连接关闭(异常断连)时决定会话去留。
      *
      * <p>优雅 DISCONNECT 的对应逻辑在 {@code DisconnectHandler} ——
-     * 那里还要处理 v5 的保留时长改写与遗嘱保留, 收口点仍是本方法。
+     * DISCONNECT 路径还要处理遗嘱清空, 收口点仍是本方法。
      */
     public void connectionClosed(String clientId) {
         SessionStore session = sessionStoreService.get(clientId);

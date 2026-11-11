@@ -39,7 +39,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  * @param action          {@link #ACTION_CONNECTED} 或 {@link #ACTION_DISCONNECTED}
  * @param clientid        客户端标识
  * @param username        认证用户名, 可能为 null(序列化时省略)
- * @param protoVersion    协议版本号(4 = v3.1.1, 5 = v5.0)
+ * @param protoVersion    协议版本号(本分支恒为 4, 即 MQTT 3.1.1)
  * @param protoName       协议名, 恒为 "MQTT"
  * @param peername        对端地址 ip:port
  * @param node            产生事件的接入节点(brokerId)
