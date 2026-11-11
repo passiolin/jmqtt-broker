@@ -125,7 +125,7 @@ jmqtt:
       auto-offset-reset: latest
       uplink-topic: ""       # 留空表示不开数据面
       uplink-filters: []
-      uplink-exclusive: false
+      uplink-exclusive: true   # 默认 true: 上行只走数据面, 扇出 N->1
       uplink-key: topic      # 分区键: topic(键=主题) 或 device(键=设备标识)
 ```
 
