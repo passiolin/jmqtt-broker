@@ -107,27 +107,11 @@ public class PublishHandler {
         }
         String topic = msg.variableHeader().topicName();
         int qos = msg.fixedHeader().qosLevel().value();
-        boolean v5 = ReplyFactory.isV5(channel);
 
-        // v5 的 Topic Alias 在 CONNACK 里被我们声明为 0(明确不接受入站别名),
-        // 客户端仍然发来就是协议错误 —— 必须显式拒绝, 而不是当成普通报文处理,
-        // 否则「topic 为空 + 别名」会被当作空主题名, 处置方式是错的。
-        if (v5 && msg.variableHeader().properties() != null
-                && msg.variableHeader().properties().getProperty(
-                        MqttProperties.MqttPropertyType.TOPIC_ALIAS.value()) != null) {
-            log.warn("v5 客户端使用了未协商的 topic alias, clientId={} 按协议错误断开", clientId);
-            ReplyFactory.closeWithReason(channel, ReplyFactory.PROTOCOL_ERROR);
-            return;
-        }
-
+        // 3.1.1 没有 Topic Alias, 非法主题名也只能关连接（没有逐条错误通道）
         if (!MqttTopic.isValidTopicName(topic)) {
             log.warn("收到非法主题名的 PUBLISH, clientId={} topic={}", clientId, topic);
-            if (v5) {
-                // v5 有专门的原因码; v3.1.1 只能直接关连接
-                ReplyFactory.closeWithReason(channel, ReplyFactory.TOPIC_NAME_INVALID);
-            } else {
-                channel.close();
-            }
+            channel.close();
             return;
         }
 
@@ -175,23 +159,16 @@ public class PublishHandler {
     }
 
     /**
-     * 拒绝语义按版本区分: v5 有逐条错误通道, 回 PUBACK/PUBREC 0x87
-     * (带错误码的 PUBREC 会同时释放报文标识符, 客户端不再走 PUBREL);
-     * v3 没有 —— 静默丢弃并记日志, 不关连接(那只会制造重连风暴)。
+     * 拒绝语义: 3.1.1 没有逐条错误通道 —— 静默丢弃并记日志, 不关连接
+     * (关连接只会制造重连风暴)。
+     *
+     * <p>QoS 1/2 被拒时也不回 PUBACK/PUBREC: 回了就等于告诉客户端"已收下"。
+     * 代价是客户端会超时重发, 直到 ACL 变更或连接断开 —— 3.1.1 的固有限制。
      */
     private void applyPublishDecision(Channel channel, PublishContext context, boolean allowed) {
         if (!allowed) {
             log.warn("PUBLISH 被 ACL 拒绝 clientId={} topic={} qos={}",
                     context.clientId(), context.topic(), context.qos());
-            if (ReplyFactory.isV5(channel)) {
-                if (context.qos() == MqttQoS.AT_LEAST_ONCE.value()) {
-                    channel.writeAndFlush(ReplyFactory.pubAck(
-                            channel, context.packetId(), ReplyFactory.NOT_AUTHORIZED));
-                } else if (context.qos() == MqttQoS.EXACTLY_ONCE.value()) {
-                    channel.writeAndFlush(ReplyFactory.pubRec(
-                            channel, context.packetId(), ReplyFactory.NOT_AUTHORIZED));
-                }
-            }
             return;
         }
         doPublish(channel, context);
@@ -214,13 +191,14 @@ public class PublishHandler {
             if (inbound == IInboundQos2Store.Result.DUPLICATE) {
                 // 重复: 不投递、不上总线、不重放 retain, 只补一个 PUBREC。
                 // 客户端据此继续走 PUBREL 流程, 与第一次收到时完全一致
-                channel.writeAndFlush(ReplyFactory.pubRec(channel, packetId, ReplyFactory.SUCCESS));
+                channel.writeAndFlush(ReplyFactory.pubRec(packetId));
                 log.debug("QoS 2 重复 PUBLISH, 已丢弃(只回 PUBREC) clientId={} packetId={}",
                         clientId, packetId);
                 return;
             }
             if (inbound == IInboundQos2Store.Result.OVERFLOW) {
-                ReplyFactory.closeWithReason(channel, ReplyFactory.RECEIVE_MAXIMUM_EXCEEDED);
+                // 3.1.1 无法告知原因, 只能断开
+                ReplyFactory.closeWithReason(channel, "RECEIVE_MAXIMUM_EXCEEDED");
                 return;
             }
         }
@@ -249,9 +227,9 @@ public class PublishHandler {
         // 在集群模式下报「无匹配订阅者」会是错的信号 —— 客户端据此可能以为消息没人要。
         // 只有在能确定「全局都没有订阅者」时才谈得上用这个码, 那需要总线回执, 属后续项。
         if (qos == MqttQoS.AT_LEAST_ONCE.value()) {
-            channel.writeAndFlush(ReplyFactory.pubAck(channel, packetId, ReplyFactory.SUCCESS));
+            channel.writeAndFlush(ReplyFactory.pubAck(packetId));
         } else if (qos == MqttQoS.EXACTLY_ONCE.value()) {
-            channel.writeAndFlush(ReplyFactory.pubRec(channel, packetId, ReplyFactory.SUCCESS));
+            channel.writeAndFlush(ReplyFactory.pubRec(packetId));
         }
 
         // retain 处理

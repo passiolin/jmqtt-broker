@@ -171,24 +171,6 @@ class PublishHandlerAclTest {
     }
 
     @Test
-    @DisplayName("ACL 拒绝(v5): 不投递, 回 PUBACK 0x87")
-    void deniedV5RepliesNotAuthorized() {
-        EmbeddedChannel subscriber = subscriberChannel();
-        EmbeddedChannel publisher = publisherChannel(true);
-        acl.hold("sensor/temp");
-        handler.processPublish(publisher, publish("sensor/temp", 1, 7, "23.5"));
-        acl.release("sensor/temp", false);
-        publisher.runPendingTasks();
-
-        assertNull(subscriber.readOutbound(), "拒绝的消息不得投递");
-        io.netty.handler.codec.mqtt.MqttMessage ack = publisher.readOutbound();
-        assertNotNull(ack, "QoS 1 拒绝也要回 PUBACK(带原因码), 否则客户端会一直重发");
-        io.netty.handler.codec.mqtt.MqttPubReplyMessageVariableHeader header =
-                (io.netty.handler.codec.mqtt.MqttPubReplyMessageVariableHeader) ack.variableHeader();
-        assertEquals(0x87, header.reasonCode() & 0xFF, "v5 Not authorized = 0x87");
-    }
-
-    @Test
     @DisplayName("ACL 拒绝(v3): 不投递不回码(v3 没有逐条错误通道)")
     void deniedV3DropsSilently() {
         EmbeddedChannel subscriber = subscriberChannel();

@@ -83,7 +83,7 @@ public class PubRecHandler {
         internalSendServer.releaseSendWindow(channel, messageId);
 
         // 回包形态按连接协商的版本决定(v5 要带原因码 + properties)
-        channel.writeAndFlush(ReplyFactory.pubRel(channel, messageId, ReplyFactory.SUCCESS));
+        channel.writeAndFlush(ReplyFactory.pubRel(messageId));
         log.trace("PUBREC clientId={} messageId={}", clientId, messageId);
     }
 }

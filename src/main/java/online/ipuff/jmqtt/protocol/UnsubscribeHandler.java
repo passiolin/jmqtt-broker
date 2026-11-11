@@ -23,33 +23,20 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
-import java.util.ArrayList;
 import java.util.List;
 
 /**
  * UNSUBSCRIBE 处理。
  *
- * <h2>UNSUBACK 在两个版本下形态相反, 这是最容易漏的一处</h2>
- * <ul>
- *   <li><b>v3.1.1</b>: UNSUBACK <b>必须没有 payload</b>。带上 payload 属于协议错误,
- *       严格的客户端会直接断开。</li>
- *   <li><b>v5</b>: UNSUBACK <b>必须有 payload</b>, 每个过滤器一个原因码,
- *       顺序与请求一致。漏掉会让客户端解包错位。</li>
- * </ul>
- * 这里把形态交给 {@link ReplyFactory#unsubAck} 决定, 本类只负责算原因码。
- *
- * <h2>v5 的原因码不是「成功/失败」二值</h2>
- * 取消一个本来就不存在的订阅, 规范上要用 {@code 0x11 No subscription existed}
- * 而不是成功 —— 客户端据此可以区分「确实退掉了」与「本来就没有」。
- * 所以 {@code subscribeStoreService.remove} 的返回值在这里有了实际用途。
+ * <h2>UNSUBACK 的形态</h2>
+ * 3.1.1 的 UNSUBACK <b>必须没有 payload</b>, 只带报文标识符。
+ * 带上 payload 属于协议错误, 严格的客户端会直接断开。
+ * 逐项取消结果（v5 才有的语义）这里只记日志, 不进报文。
  */
 @Component
 public class UnsubscribeHandler {
 
     private static final Logger log = LoggerFactory.getLogger(UnsubscribeHandler.class);
-
-    /** v5: 该过滤器本来就没有订阅 */
-    private static final short NO_SUBSCRIPTION_EXISTED = 0x11;
 
     private final ISubscribeStoreService subscribeStoreService;
     private final SessionPersistence sessionPersistence;
@@ -68,18 +55,20 @@ public class UnsubscribeHandler {
             return;
         }
 
-        List<Short> reasonCodes = new ArrayList<>(topicFilters.size());
+        // 3.1.1 的 UNSUBACK 不带逐项结果 —— 只能带报文标识符。
+        // 无效过滤器仍然逐条剔除, 但结果只进日志, 不进报文。
+        int removedCount = 0;
         for (String topicFilter : topicFilters) {
             if (!MqttTopic.isValidFilter(topicFilter)) {
-                reasonCodes.add((short) ReplyFactory.TOPIC_FILTER_INVALID);
                 continue;
             }
-            boolean removed = subscribeStoreService.remove(clientId, topicFilter);
+            if (subscribeStoreService.remove(clientId, topicFilter)) {
+                removedCount++;
+            }
             sessionPersistence.subscriptionRemoved(clientId, topicFilter);
-            reasonCodes.add(removed ? (short) ReplyFactory.SUCCESS : NO_SUBSCRIPTION_EXISTED);
         }
 
-        channel.writeAndFlush(ReplyFactory.unsubAck(channel, msg.variableHeader().messageId(), reasonCodes));
-        log.debug("UNSUBSCRIBE clientId={} topicFilters={} 结果={}", clientId, topicFilters, reasonCodes);
+        channel.writeAndFlush(ReplyFactory.unsubAck(msg.variableHeader().messageId()));
+        log.debug("UNSUBSCRIBE clientId={} topicFilters={} 已移除={}", clientId, topicFilters, removedCount);
     }
 }

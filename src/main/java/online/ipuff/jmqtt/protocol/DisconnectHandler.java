@@ -96,7 +96,7 @@ public class DisconnectHandler {
             if (session.getExpireSeconds() == 0 && requestedExpiry > 0) {
                 log.warn("v5 DISCONNECT 试图把会话保留时长从 0 调大, clientId={} 请求={}s, 按协议错误处理",
                         clientId, requestedExpiry);
-                ReplyFactory.closeWithReason(channel, ReplyFactory.PROTOCOL_ERROR);
+                ReplyFactory.closeWithReason(channel, "PROTOCOL_ERROR");
                 return;
             }
             long previous = session.getExpireSeconds();
@@ -129,14 +129,11 @@ public class DisconnectHandler {
     }
 
     /**
-     * DISCONNECT 的原因码。v3.1.1 的 DISCONNECT 没有可变头, 视作 0x00。
+     * 3.1.1 的 DISCONNECT 没有可变头, 语义恒为「正常断开」。
+     * 保留这个方法是为了让调用点不必改变形态。
      */
     private int reasonCode(MqttMessage msg) {
-        if (msg.variableHeader() instanceof MqttReasonCodeAndPropertiesVariableHeader v5Header) {
-            // Netty 用有符号 byte 承载, 必须按无符号解读
-            return v5Header.reasonCode() & 0xFF;
-        }
-        return ReplyFactory.SUCCESS;
+        return 0;
     }
 
     /**

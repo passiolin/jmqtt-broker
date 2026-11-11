@@ -1,6 +1,17 @@
 # jmqtt-broker
 
-基于 **Netty + Spring Boot** 的 MQTT Broker，单模块 Maven 工程，支持 MQTT 3.1.1 与 5.0。
+基于 **Netty + Spring Boot** 的 MQTT Broker，单模块 Maven 工程。
+
+> **本分支（`v3-lite`）只支持 MQTT 3.1.1。**
+>
+> v5 客户端在 CONNECT 阶段被明确拒绝（CONNACK 返回「协议版本不支持」），不会静默降级。
+> 保留 v5 的 `main` 分支仍然完整可用，两者的差别见文末「与 main 的差异」。
+>
+> 裁剪的理由是**场景匹配**而不是性能：终端固件只实现 3.1.1，v5 的 properties 解析、
+> 原因码映射、会话生命周期语义在本场景中永远不会被执行；而两个版本对同一语义的字节
+> 编码完全不同（CONNACK 的 properties 长度、PUBACK 的原因码、UNSUBACK 是否带 payload），
+> 保留一个用不到的版本意味着每处回包都要同步维护两套形态。实测表明 v5 分支不在热路径上，
+> 每日百万级消息的压测中从未被执行 —— 裁掉它的收益是**代码就剩一种形态**，不是吞吐。
 
 ## 设计
 
@@ -38,7 +49,7 @@ Kafka 若启用，只承担集群消息总线与上行数据面，同样不在�
 | 构建 | Maven，**单模块** |
 | 网络 | Netty 4.1.x（版本由 Spring Boot 的 netty-bom 统一管理） |
 | 编解码 | `io.netty:netty-codec-mqtt`（官方库，支持 v3.1 / v3.1.1 / v5.0） |
-| 协议 | MQTT 3.1.1 / 5.0 双栈（按 CONNECT 自动分流） |
+| 协议 | **MQTT 3.1.1**（v5 客户端在握手阶段拒绝） |
 | 许可 | Apache License 2.0 |
 
 ## 快速开始
@@ -233,3 +244,26 @@ broker 基线：`consumer-threads=0`（2×核）、`max-inflight=32`、`max-mque
 
 MQTT 报文的编解码使用 [Netty](https://netty.io) 官方的 `netty-codec-mqtt`
 （v3.1.1 与 v5.0 均已支持）。
+
+## 与 main 的差异（v3-lite）
+
+| 项 | main | v3-lite |
+|---|---|---|
+| 协议 | 3.1.1 + 5.0 双栈 | **仅 3.1.1**；v5 客户端在 CONNECT 阶段拒绝 |
+| `ReplyFactory` | 324 行，9 处版本分支 | **209 行，无版本分支** |
+| `ConnectOptions` | 8 个字段（含 SEI / Receive Maximum / Packet Size / Alias / Will Delay） | **3 个字段**（cleanSession / sessionExpiry / receiveMaximum） |
+| 出站回包 | 按连接版本构造两套形态 | 只有一种形态 |
+| 订阅处理 | 含 Retain Handling 选项与 v5 细分失败码 | 只有 0x80 一个失败码；每次订阅都投递保留消息 |
+| ACL 拒绝 | v5 回 0x87 原因码；3.1.1 静默丢弃 | 只有静默丢弃 |
+
+保留的能力（与 main 一致）：QoS 0/1/2、保留消息、遗嘱消息、连接接管、
+持久会话、离线队列、发送窗口与背压、在途消息持久化、Kafka 集群总线、Redis 会话持久化、
+管理面（Redis 控制平面）。
+
+裁剪带来的行为变化，升级前需要确认：
+
+1. **v5 客户端无法连接**。若存在发 v5 CONNECT 的固件版本，会在握手阶段收到拒绝码。
+2. **ACL 拒绝的 QoS 1/2 消息不回确认**。客户端会超时重发，直到 ACL 变更或连接断开 ——
+   这是 3.1.1 没有逐条错误通道的固有限制。
+3. **UNSUBACK 不带逐项结果**。取消订阅的逐项成败只进日志。
+4. **SUBACK 失败码只有 0x80**。无法区分「过滤器非法」与「未授权」。

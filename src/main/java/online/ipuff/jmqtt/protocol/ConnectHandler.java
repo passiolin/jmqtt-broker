@@ -152,13 +152,18 @@ public class ConnectHandler {
     }
 
     public void processConnect(Channel channel, MqttConnectMessage msg) {
-        // 协议级别只有 4(v3.1.1) 与 5(v5.0) 两种需要区分; 其余值 Netty 解码器
-        // 已在生成报文阶段就抛出 MqttUnacceptableProtocolVersionException 拒绝了,
-        // 走不到这里, 所以不必再判一次。
-        MqttVersion version = msg.variableHeader().version() == ConnectOptions.VERSION_5
-                ? MqttVersion.MQTT_5 : MqttVersion.MQTT_3_1_1;
-        // 必须尽早写入: 之后所有回包(包括拒绝)都要按这个版本构造
-        channel.attr(ChannelAttributes.PROTOCOL_VERSION).set(version);
+        // 本分支只服务 MQTT 3.1.1。v5 客户端在入口就拒绝:
+        // 让它在握手阶段拿到明确的「协议版本不支持」, 而不是连上之后
+        // 因为回包形态不匹配而进入难以定位的错位状态。
+        // 其余非法协议级别由 Netty 解码器抛出 MqttUnacceptableProtocolVersionException 拦下。
+        if (msg.variableHeader().version() != ConnectOptions.VERSION_3_1_1) {
+            log.debug("CONNECT 被拒绝: 不支持的协议级别 {} (仅支持 3.1.1)",
+                    msg.variableHeader().version());
+            nodeMetricsService.connectionRejected("protocol");
+            rejectAndClose(channel, ReplyFactory.ConnAckReason.UNSUPPORTED_PROTOCOL_VERSION);
+            return;
+        }
+        channel.attr(ChannelAttributes.PROTOCOL_VERSION).set(MqttVersion.MQTT_3_1_1);
 
         ConnectOptions options = ConnectOptions.parse(msg, properties);
         channel.attr(ChannelAttributes.CONNECT_OPTIONS).set(options);
@@ -166,22 +171,13 @@ public class ConnectHandler {
         channel.attr(ChannelAttributes.USERNAME).set(msg.payload().userName());
 
         String clientId = msg.payload().clientIdentifier();
-        boolean assignedClientId = false;
 
-        // 1) clientId
+        // 1) clientId: 3.1.1 没有服务端分配机制, 空 clientId 只能拒绝
         if (clientId == null || clientId.isEmpty()) {
-            // v5 允许服务端分配 clientId（并且必须回 Assigned Client Identifier）;
-            // v3.1.1 没有这个机制, 只能拒绝
-            if (options.isV5()) {
-                clientId = generateClientId();
-                assignedClientId = true;
-                log.debug("v5 客户端未提供 clientId, 已分配: {}", clientId);
-            } else {
-                log.debug("CONNECT 被拒绝: clientId 为空");
-                nodeMetricsService.connectionRejected("clientId");
-                rejectAndClose(channel, version, ReplyFactory.ConnAckReason.CLIENT_IDENTIFIER_NOT_VALID);
-                return;
-            }
+            log.debug("CONNECT 被拒绝: clientId 为空");
+            nodeMetricsService.connectionRejected("clientId");
+            rejectAndClose(channel, ReplyFactory.ConnAckReason.CLIENT_IDENTIFIER_NOT_VALID);
+            return;
         }
 
         // 2) 认证 —— 可能要等外部 HTTP 认证中心的响应, 挂起处理。
@@ -195,18 +191,13 @@ public class ConnectHandler {
                 ? null
                 : new String(msg.payload().passwordInBytes(), CharsetUtil.UTF_8);
 
-        // clientId 在 v5 分配分支被重赋值, 拷贝成最终变量供续接 lambda 捕获
-        final String effectiveClientId = clientId;
-        final boolean effectiveAssigned = assignedClientId;
-
         CompletableFuture<AuthResult> authFuture = properties.authEnabled()
-                ? authService.authenticate(effectiveClientId, username, password,
+                ? authService.authenticate(clientId, username, password,
                         ChannelAttributes.peerhostOf(channel))
                 : CompletableFuture.completedFuture(AuthResult.ALLOW);
 
-        awaitAuth(channel, authFuture, version, () -> finishConnect(
-                channel, version, options, effectiveClientId, effectiveAssigned,
-                willMessage, requestedKeepAlive));
+        awaitAuth(channel, authFuture, () -> finishConnect(
+                channel, options, clientId, willMessage, requestedKeepAlive));
     }
 
     /**
@@ -219,9 +210,9 @@ public class ConnectHandler {
      * 连接状态始终保持单线程访问。挂起期间连接断开则安全放弃。
      */
     private void awaitAuth(Channel channel, CompletableFuture<AuthResult> future,
-                           MqttVersion version, Runnable continuation) {
+                           Runnable continuation) {
         if (future.isDone()) {
-            completeAuth(channel, join(future), version, continuation);
+            completeAuth(channel, join(future), continuation);
             return;
         }
         channel.attr(ChannelAttributes.AUTH_PENDING).set(Boolean.TRUE);
@@ -231,7 +222,7 @@ public class ConnectHandler {
                 log.debug("认证结果到达前连接已断开, 放弃本次 CONNECT");
                 return;
             }
-            completeAuth(channel, error == null ? result : AuthResult.DENY, version, continuation);
+            completeAuth(channel, error == null ? result : AuthResult.DENY, continuation);
         }));
     }
 
@@ -247,12 +238,11 @@ public class ConnectHandler {
         }
     }
 
-    private void completeAuth(Channel channel, AuthResult result,
-                              MqttVersion version, Runnable continuation) {
+    private void completeAuth(Channel channel, AuthResult result, Runnable continuation) {
         if (!result.allowed()) {
             log.debug("CONNECT 被拒绝: 认证失败");
             nodeMetricsService.connectionRejected("auth");
-            rejectAndClose(channel, version, ReplyFactory.ConnAckReason.BAD_CREDENTIALS);
+            rejectAndClose(channel, ReplyFactory.ConnAckReason.BAD_CREDENTIALS);
             return;
         }
         if (result.superuser()) {
@@ -265,14 +255,13 @@ public class ConnectHandler {
      * 认证通过后的 CONNECT 后半段: 会话处理、落库、注册、CONNACK、恢复投递。
      * 参数里的遗嘱与心跳是挂起前从 CONNECT 报文里取出的快照。
      */
-    private void finishConnect(Channel channel, MqttVersion version, ConnectOptions options,
-                               String clientId, boolean assignedClientId,
+    private void finishConnect(Channel channel, ConnectOptions options, String clientId,
                                WillMessage willMessage, int requestedKeepAlive) {
         // 3) 会话处理 —— 决定 sessionPresent
         SessionStore existing = sessionStoreService.get(clientId);
         boolean sessionPresent = false;
 
-        if (options.cleanStart()) {
+        if (options.cleanSession()) {
             // 规范要求请求丢弃既有会话时, 服务端丢弃既有会话及其全部状态
             clearSessionState(clientId);
             existing = null;
@@ -297,9 +286,9 @@ public class ConnectHandler {
         // 4) 遗嘱已在挂起前解析(参数传入, 含 v5 的 Will Delay Interval)
 
         // 5) 落库会话
-        SessionStore session = (existing != null && !options.cleanStart())
+        SessionStore session = (existing != null && !options.cleanSession())
                 ? existing
-                : new SessionStore(properties.id(), clientId, options.cleanStart(),
+                : new SessionStore(properties.id(), clientId, options.cleanSession(),
                         options.sessionExpirySeconds());
         session.setExpireSeconds(options.sessionExpirySeconds());
         session.setWillMessage(willMessage);
@@ -355,11 +344,10 @@ public class ConnectHandler {
         }
 
         // 8) CONNACK
-        channel.writeAndFlush(ReplyFactory.connAck(version,
-                MqttConnectReturnCode.CONNECTION_ACCEPTED, sessionPresent,
-                buildConnAckProperties(session, options, assignedClientId ? clientId : null, keepAlive)));
-        log.debug("CONNECT 成功 clientId={} version={} cleanStart={} sessionPresent={} 会话保留={}s 窗口={}",
-                clientId, version, options.cleanStart(), sessionPresent,
+        channel.writeAndFlush(ReplyFactory.connAck(
+                MqttConnectReturnCode.CONNECTION_ACCEPTED, sessionPresent));
+        log.debug("CONNECT 成功 clientId={} cleanSession={} sessionPresent={} 会话保留={}s 窗口={}",
+                clientId, options.cleanSession(), sessionPresent,
                 session.getExpireSeconds(), window);
 
         // 管理面可见性: 只往有界队列里塞一条, 不做任何 Redis 调用。
@@ -371,7 +359,7 @@ public class ConnectHandler {
         clusterBus.publishConnectionEvent(online.ipuff.jmqtt.cluster.ConnectionEvent.connected(
                 clientId,
                 channel.attr(ChannelAttributes.USERNAME).get(),
-                options.isV5() ? 5 : 4,
+                4,
                 ChannelAttributes.peernameOf(channel),
                 properties.id()));
 
@@ -388,36 +376,6 @@ public class ConnectHandler {
             //     放在重发未确认消息之后: 先补齐已发出的, 再补未发出的, 顺序更贴近真实时序。
             internalSendServer.deliverPendingMessages(clientId, channel);
         }
-    }
-
-    /**
-     * CONNACK 的 v5 属性。v3.1.1 传 null —— {@link ReplyFactory#connAck} 会用两参构造。
-     */
-    private MqttProperties buildConnAckProperties(SessionStore session, ConnectOptions options,
-                                                  String assignedClientId, int keepAlive) {
-        if (!options.isV5()) {
-            return null;
-        }
-        MqttProperties props = new MqttProperties();
-        addInt(props, MqttProperties.MqttPropertyType.SESSION_EXPIRY_INTERVAL, session.getExpireSeconds());
-        addInt(props, MqttProperties.MqttPropertyType.RECEIVE_MAXIMUM, properties.maxInflight());
-        addInt(props, MqttProperties.MqttPropertyType.MAXIMUM_PACKET_SIZE, properties.maxPayloadSize());
-        // 我们不接受入站 topic alias —— 明确声明 0, 而不是默不作声地忽略它
-        addInt(props, MqttProperties.MqttPropertyType.TOPIC_ALIAS_MAXIMUM, properties.topicAliasMaximum());
-        // 能力声明: 用声明代替让客户端试错
-        addInt(props, MqttProperties.MqttPropertyType.MAXIMUM_QOS, 2);
-        addInt(props, MqttProperties.MqttPropertyType.RETAIN_AVAILABLE, 1);
-        addInt(props, MqttProperties.MqttPropertyType.WILDCARD_SUBSCRIPTION_AVAILABLE, 1);
-        addInt(props, MqttProperties.MqttPropertyType.SHARED_SUBSCRIPTION_AVAILABLE, 0);
-        addInt(props, MqttProperties.MqttPropertyType.SUBSCRIPTION_IDENTIFIER_AVAILABLE, 0);
-        if (properties.serverKeepAlive() > 0) {
-            addInt(props, MqttProperties.MqttPropertyType.SERVER_KEEP_ALIVE, keepAlive);
-        }
-        if (assignedClientId != null) {
-            props.add(new MqttProperties.StringProperty(
-                    MqttProperties.MqttPropertyType.ASSIGNED_CLIENT_IDENTIFIER.value(), assignedClientId));
-        }
-        return props;
     }
 
     private static void addInt(MqttProperties props, MqttProperties.MqttPropertyType type, long value) {
@@ -487,9 +445,8 @@ public class ConnectHandler {
     /**
      * 用对应版本的拒绝码回 CONNACK 并关闭连接。
      */
-    private void rejectAndClose(Channel channel, MqttVersion version, ReplyFactory.ConnAckReason reason) {
-        channel.writeAndFlush(ReplyFactory.connAck(version,
-                ReplyFactory.connAckCode(version, reason), false, null))
+    private void rejectAndClose(Channel channel, ReplyFactory.ConnAckReason reason) {
+        channel.writeAndFlush(ReplyFactory.connAck(ReplyFactory.connAckCode(reason), false))
                 .addListener(f -> channel.close());
     }
 
@@ -553,8 +510,7 @@ public class ConnectHandler {
                 msg.payload().willTopic(),
                 payload == null ? new byte[0] : payload,
                 msg.variableHeader().willQos(),
-                msg.variableHeader().isWillRetain(),
-                options.willDelaySeconds());
+                msg.variableHeader().isWillRetain());
     }
 
     /**
@@ -569,7 +525,7 @@ public class ConnectHandler {
         SendBuffer buffer = channel.attr(ChannelAttributes.SEND_BUFFER).get();
         List<DupPublishMessageStore> publishes = dupPublishMessageStoreService.get(clientId);
         for (DupPublishMessageStore stored : publishes) {
-            channel.write(ReplyFactory.publish(channel, stored.topic(), stored.qos(),
+            channel.write(ReplyFactory.publish(stored.topic(), stored.qos(),
                     stored.messageId(), stored.payload(), false, true));
             if (buffer != null) {
                 buffer.confirm(stored.messageId());
@@ -577,7 +533,7 @@ public class ConnectHandler {
         }
         List<DupPubRelMessageStore> pubRels = dupPubRelMessageStoreService.get(clientId);
         for (DupPubRelMessageStore stored : pubRels) {
-            channel.write(ReplyFactory.pubRel(channel, stored.messageId(), ReplyFactory.SUCCESS));
+            channel.write(ReplyFactory.pubRel(stored.messageId()));
         }
         if (!publishes.isEmpty() || !pubRels.isEmpty()) {
             log.debug("重发未确认消息 clientId={} publish={} pubrel={}",

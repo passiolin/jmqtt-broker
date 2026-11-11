@@ -52,7 +52,7 @@ public class PubRelHandler {
         }
         int messageId = variableHeader.messageId();
         inboundQos2Store.release(clientId, messageId);
-        channel.writeAndFlush(ReplyFactory.pubComp(channel, messageId, ReplyFactory.SUCCESS));
+        channel.writeAndFlush(ReplyFactory.pubComp(messageId));
         log.trace("PUBREL clientId={} messageId={}", clientId, messageId);
     }
 }

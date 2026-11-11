@@ -293,7 +293,7 @@ public class InternalSendServer {
     private void writePublish(Channel channel, String topic, byte[] payload, int packetId,
                               int qos, boolean retain, boolean dup) {
         channel.writeAndFlush(
-                ReplyFactory.publish(channel, topic, qos, packetId, payload, retain, dup),
+                ReplyFactory.publish(topic, qos, packetId, payload, retain, dup),
                 channel.voidPromise());
     }
 

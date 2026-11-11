@@ -145,7 +145,7 @@ class ConnectHandlerAuthTest {
     @DisplayName("认证未完成时不回 CONNACK, 完成后回 CONNECTION_ACCEPTED")
     void connackWaitsForAuthResult() {
         EmbeddedChannel channel = new EmbeddedChannel();
-        handler.processConnect(channel, connect(true, "client-1", "jmqtt", "jmqtt"));
+        handler.processConnect(channel, connect(false, "client-1", "jmqtt", "jmqtt"));
 
         assertNull(channel.readOutbound(), "认证挂起期间不得回 CONNACK");
         assertEquals(Boolean.TRUE, channel.attr(ChannelAttributes.AUTH_PENDING).get(),
@@ -163,17 +163,17 @@ class ConnectHandlerAuthTest {
     }
 
     @Test
-    @DisplayName("认证拒绝回 0x86 并关闭连接(v5)")
+    @DisplayName("认证拒绝回 0x04 并关闭连接(v3.1.1)")
     void authDenyRepliesBadCredentials() {
         EmbeddedChannel channel = new EmbeddedChannel();
-        handler.processConnect(channel, connect(true, "client-1", "jmqtt", "wrong"));
+        handler.processConnect(channel, connect(false, "client-1", "jmqtt", "wrong"));
 
         authGate.complete(AuthResult.DENY);
         channel.runPendingTasks();
 
         MqttConnAckMessage connAck = channel.readOutbound();
         assertNotNull(connAck);
-        assertEquals(MqttConnectReturnCode.CONNECTION_REFUSED_BAD_USERNAME_OR_PASSWORD,
+        assertEquals(MqttConnectReturnCode.CONNECTION_REFUSED_BAD_USER_NAME_OR_PASSWORD,
                 connAck.variableHeader().connectReturnCode());
         assertFalse(channel.isActive(), "拒绝后必须关闭连接");
         assertNull(channel.attr(ChannelAttributes.CLIENT_ID).get(), "不得注册 clientId");
@@ -198,7 +198,7 @@ class ConnectHandlerAuthTest {
     @DisplayName("superuser=true 落到 Channel 属性, 供 ACL 跳过判定")
     void superuserLandsOnChannel() {
         EmbeddedChannel channel = new EmbeddedChannel();
-        handler.processConnect(channel, connect(true, "client-1", "jmqtt", "jmqtt"));
+        handler.processConnect(channel, connect(false, "client-1", "jmqtt", "jmqtt"));
 
         authGate.complete(new AuthResult(true, true));
         channel.runPendingTasks();
@@ -211,7 +211,7 @@ class ConnectHandlerAuthTest {
     @DisplayName("挂起期间连接断开: 认证结果晚到也不得写 CONNACK 或注册")
     void channelClosedDuringPendingAuthIsAbandoned() {
         EmbeddedChannel channel = new EmbeddedChannel();
-        handler.processConnect(channel, connect(true, "client-1", "jmqtt", "jmqtt"));
+        handler.processConnect(channel, connect(false, "client-1", "jmqtt", "jmqtt"));
 
         channel.close();
         authGate.complete(AuthResult.ALLOW);
@@ -243,5 +243,22 @@ class ConnectHandlerAuthTest {
                 return null;
             }
         };
+    }
+
+    @Test
+    @DisplayName("v5 客户端在入口被拒绝, 回「协议版本不支持」且不进认证")
+    void v5ClientRejectedAtEntry() {
+        EmbeddedChannel channel = new EmbeddedChannel();
+        handler.processConnect(channel, connect(true, "client-1", "jmqtt", "jmqtt"));
+
+        MqttConnAckMessage connAck = channel.readOutbound();
+        assertNotNull(connAck, "必须回一个 CONNACK 而不是静默断开");
+        assertEquals(MqttConnectReturnCode.CONNECTION_REFUSED_UNACCEPTABLE_PROTOCOL_VERSION,
+                connAck.variableHeader().connectReturnCode());
+
+        assertNull(channel.attr(ChannelAttributes.AUTH_PENDING).get(),
+                "协议版本不支持时不应进入认证挂起");
+        assertNull(channel.attr(ChannelAttributes.CLIENT_ID).get(), "不得注册连接");
+        assertFalse(connectionRegistry.isOnline("client-1"));
     }
 }

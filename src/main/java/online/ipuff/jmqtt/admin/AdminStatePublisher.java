@@ -565,7 +565,7 @@ public class AdminStatePublisher {
         }
         ConnectOptions options = channel.attr(ChannelAttributes.CONNECT_OPTIONS).get();
         if (options != null) {
-            view.put("ver", options.protocolVersion());
+            view.put("ver", 4);
             view.put("receiveMax", options.receiveMaximum());
         }
         view.put("keepAlive", attr(channel, ChannelAttributes.KEEP_ALIVE, 0));

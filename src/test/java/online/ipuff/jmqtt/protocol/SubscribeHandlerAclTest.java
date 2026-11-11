@@ -146,14 +146,14 @@ class SubscribeHandlerAclTest {
     }
 
     @Test
-    @DisplayName("拒绝的过滤器回 0x87, 同报文其他过滤器照常接受")
+    @DisplayName("拒绝的过滤器回 0x80, 同报文其他过滤器照常接受")
     void deniedFilterGetsNotAuthorizedOthersGranted() {
-        EmbeddedChannel channel = clientChannel(true);
+        EmbeddedChannel channel = clientChannel(false);
         acl.decisions.put("subscribe\nsecret/#", false);
 
         handler.processSubscribe(channel, subscribe(1, "secret/#", "sensor/#"));
 
-        assertEquals(List.of(0x87, 1), reasonCodes(channel), "逐项失败码: 拒绝 0x87, 放行授予 qos");
+        assertEquals(List.of(0x80, 1), reasonCodes(channel), "逐项失败码: 拒绝 0x80, 放行授予 qos");
         List<String> stored = subscribeStoreService.subscriptionsOf("client-1").stream()
                 .map(online.ipuff.jmqtt.message.SubscribeStore::topicFilter).toList();
         assertFalse(stored.contains("secret/#"), "拒绝的过滤器不得进订阅表");

@@ -142,7 +142,7 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
             if (msg.fixedHeader().messageType() != MqttMessageType.CONNECT) {
                 log.warn("首包不是 CONNECT, 按协议错误断开: type={} remote={}",
                         msg.fixedHeader().messageType(), channel.remoteAddress());
-                ReplyFactory.closeWithReason(channel, ReplyFactory.PROTOCOL_ERROR);
+                ReplyFactory.closeWithReason(channel, "PROTOCOL_ERROR");
                 return;
             }
             channel.attr(ChannelAttributes.CONNECT_SEEN).set(Boolean.TRUE);
@@ -281,9 +281,7 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
                         online.ipuff.jmqtt.cluster.ConnectionEvent.disconnected(
                                 clientId,
                                 channel.attr(ChannelAttributes.USERNAME).get(),
-                                Boolean.TRUE.equals(
-                                        channel.attr(ChannelAttributes.PROTOCOL_VERSION).get()
-                                                == io.netty.handler.codec.mqtt.MqttVersion.MQTT_5) ? 5 : 4,
+                                4,
                                 ChannelAttributes.peernameOf(channel),
                                 null,
                                 Boolean.TRUE.equals(

@@ -323,8 +323,7 @@ public class RedisSessionRepository implements ISessionRepository {
                     will.topic(),
                     will.payload() == null ? "" : Base64.getEncoder().encodeToString(will.payload()),
                     will.qos(),
-                    will.retain(),
-                    will.willDelaySeconds());
+                    will.retain());
             return objectMapper.writeValueAsString(json);
         } catch (Exception e) {
             log.warn("遗嘱消息序列化失败, 将不持久化", e);
@@ -341,8 +340,7 @@ public class RedisSessionRepository implements ISessionRepository {
             byte[] payload = decoded.payload() == null || decoded.payload().isEmpty()
                     ? new byte[0]
                     : Base64.getDecoder().decode(decoded.payload());
-            return new WillMessage(decoded.topic(), payload, decoded.qos(), decoded.retain(),
-                    decoded.willDelaySeconds());
+            return new WillMessage(decoded.topic(), payload, decoded.qos(), decoded.retain());
         } catch (Exception e) {
             log.warn("遗嘱消息反序列化失败, 按无遗嘱处理", e);
             return null;
@@ -352,7 +350,6 @@ public class RedisSessionRepository implements ISessionRepository {
     /**
      * 遗嘱消息的持久化形态。
      */
-    private record WillJson(String topic, String payload, int qos, boolean retain,
-                            long willDelaySeconds) {
+    private record WillJson(String topic, String payload, int qos, boolean retain) {
     }
 }

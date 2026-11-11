@@ -24,16 +24,6 @@ package online.ipuff.jmqtt.message;
  * @param payload 遗嘱内容
  * @param qos     遗嘱 QoS
  * @param retain  是否为保留消息
- * @param willDelaySeconds v5 的 Will Delay Interval(秒)。
- *        <b>当前只解析保存, 不做延迟投递</b>: 延迟投递需要一个独立的定时器,
- *        并且要会与「会话过期回收」的职责划清边界(会话到期与遗嘱延迟到期是两件事)。
- *        把它丢在解码层不存, 会让 v5 客户端的这个语义无声消失 —— 所以先存下来。
  */
-public record WillMessage(String topic, byte[] payload, int qos, boolean retain,
-                          long willDelaySeconds) {
-
-    /** v3.1.1 没有遗嘱延迟, 默认 0 */
-    public WillMessage(String topic, byte[] payload, int qos, boolean retain) {
-        this(topic, payload, qos, retain, 0L);
-    }
+public record WillMessage(String topic, byte[] payload, int qos, boolean retain) {
 }
