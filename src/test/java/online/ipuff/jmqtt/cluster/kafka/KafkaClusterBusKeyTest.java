@@ -43,7 +43,7 @@ class KafkaClusterBusKeyTest {
     private static KafkaClusterBus bus(BrokerProperties.KafkaProperties kafka) {
         return new KafkaClusterBus(TestBrokerProperties.create(
                         "node-1", 32, 1000, kafka),
-                null, (clientId, fromNodeId) -> { }, new online.ipuff.jmqtt.subscribe.SubscribeStoreService());
+                null, new online.ipuff.jmqtt.subscribe.SubscribeStoreService());
     }
 
     private static InternalMessage message(String clientId, String topic) {
@@ -53,7 +53,7 @@ class KafkaClusterBusKeyTest {
 
     private static org.apache.kafka.clients.producer.ProducerRecord<String, byte[]>
     take(KafkaClusterBus bus) throws InterruptedException {
-        return bus.outbox.poll(2, TimeUnit.SECONDS);
+        return bus.outbox().poll(2, TimeUnit.SECONDS);
     }
 
     @Test

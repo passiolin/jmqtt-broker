@@ -284,10 +284,7 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
                                 4,
                                 ChannelAttributes.peernameOf(channel),
                                 null,
-                                Boolean.TRUE.equals(
-                                        channel.attr(ChannelAttributes.GRACEFUL_DISCONNECT).get())
-                                        ? online.ipuff.jmqtt.cluster.ConnectionEvent.REASON_CLOSED
-                                        : online.ipuff.jmqtt.cluster.ConnectionEvent.REASON_TCP_CLOSED));
+                                disconnectReason(channel)));
             }
             // ACL 决策缓存随连接释放(无论是否被接管 —— 新连接有自己的缓存条目)
             aclService.onClientOffline(clientId);
@@ -309,12 +306,25 @@ public class MqttBrokerHandler extends SimpleChannelInboundHandler<MqttMessage> 
         }
     }
 
+    /** 下线原因: 优雅断开 > 空闲超时 > 其他异常 */
+    private static String disconnectReason(Channel channel) {
+        if (Boolean.TRUE.equals(channel.attr(ChannelAttributes.GRACEFUL_DISCONNECT).get())) {
+            return online.ipuff.jmqtt.cluster.ConnectionEvent.REASON_CLOSED;
+        }
+        if (Boolean.TRUE.equals(channel.attr(ChannelAttributes.KEEPALIVE_TIMEOUT).get())) {
+            return online.ipuff.jmqtt.cluster.ConnectionEvent.REASON_KEEPALIVE_TIMEOUT;
+        }
+        return online.ipuff.jmqtt.cluster.ConnectionEvent.REASON_TCP_CLOSED;
+    }
+
     @Override
     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
         if (evt instanceof IdleStateEvent idleEvent && idleEvent.state() == IdleState.ALL_IDLE) {
             Channel channel = ctx.channel();
             String clientId = channel.attr(ChannelAttributes.CLIENT_ID).get();
             log.debug("空闲超时, 关闭连接 clientId={}", clientId);
+            // 打标: channelInactive 据此把下线原因报成 keepalive_timeout
+            channel.attr(ChannelAttributes.KEEPALIVE_TIMEOUT).set(Boolean.TRUE);
             // 遗嘱发布统一放在 channelInactive 里, 避免两处重复触发
             channel.close();
             return;

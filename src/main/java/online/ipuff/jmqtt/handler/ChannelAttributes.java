@@ -146,6 +146,10 @@ public final class ChannelAttributes {
      * 下线原因(closed = 优雅离线, tcp_closed = 连接断开/心跳超时/被接管),
      * 供连接事件({@code connection-event-topic})使用。
      */
+    /** 是否因 keepalive 空闲超时被关闭(用于下线事件的原因判定) */
+    public static final AttributeKey<Boolean> KEEPALIVE_TIMEOUT =
+            AttributeKey.valueOf("jmqtt.keepaliveTimeout");
+
     public static final AttributeKey<Boolean> GRACEFUL_DISCONNECT =
             AttributeKey.valueOf("jmqtt.gracefulDisconnect");
 

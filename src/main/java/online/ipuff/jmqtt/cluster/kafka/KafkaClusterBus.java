@@ -18,75 +18,35 @@ import online.ipuff.jmqtt.cluster.ClusterBusStats;
 import online.ipuff.jmqtt.cluster.ConnectionEvent;
 import online.ipuff.jmqtt.cluster.InternalMessage;
 import online.ipuff.jmqtt.cluster.InternalSendServer;
-import online.ipuff.jmqtt.cluster.TakeoverListener;
 import online.ipuff.jmqtt.config.BrokerProperties;
 import online.ipuff.jmqtt.router.MqttTopic;
 import online.ipuff.jmqtt.router.TopicTrie;
 import online.ipuff.jmqtt.subscribe.ISubscribeStoreService;
-import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.clients.consumer.ConsumerRecords;
-import org.apache.kafka.clients.consumer.KafkaConsumer;
-import org.apache.kafka.clients.consumer.OffsetAndMetadata;
-import org.apache.kafka.clients.producer.KafkaProducer;
-import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
-import org.apache.kafka.common.KafkaException;
-import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.errors.WakeupException;
-import org.apache.kafka.common.serialization.ByteArrayDeserializer;
-import org.apache.kafka.common.serialization.ByteArraySerializer;
-import org.apache.kafka.common.serialization.StringDeserializer;
-import org.apache.kafka.common.serialization.StringSerializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 
-import java.time.Duration;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 基于 Kafka 的集群总线。
+ * Kafka 总线的一级入口: 路由决策 + 组件装配 + 统计聚合。
  *
- * <h2>消息面: 每节点独立消费组的广播</h2>
- * 发布时写入 {@code cluster-topic}; 每个节点用<b>各自的 group.id</b> 消费该 topic,
- * 因此每个节点都收到全量消息, 再各自与本地主题树匹配投递。
+ * <p>内部三件套(职责分离, 各自独立启停):
+ * <ul>
+ *   <li>{@link KafkaMessageProducer} —— 生产者: 有界出站队列 + 发送线程</li>
+ *   <li>{@link KafkaClusterConsumer} —— 消费集群广播(jmqtt-cluster)</li>
+ *   <li>{@link KafkaDownlinkConsumer} —— 消费后台下行(downlink topics)</li>
+ * </ul>
  *
- * <h2>三条关键实现约定</h2>
- * <ol>
- *   <li><b>跳过自身消息</b> —— {@code brokerId} 等于本节点时直接丢弃。
- *       发布节点在发布瞬间已完成本地投递, 若再从总线取回会重复投递。</li>
- *   <li><b>出站不阻塞</b> —— {@link #publish} 只往有界队列里塞, 立刻返回。
- *       队列满时丢弃并计数。这里的选择是明确的: <b>宁可丢跨节点消息,
- *       也不能让 Kafka 故障卡住本节点投递</b>。</li>
- *   <li><b>ingress 不再出站</b> —— 消费路径只调用
- *       {@link InternalSendServer#sendPublishMessage}, 不经过任何出站路径,
- *       从结构上排除回环。</li>
- * </ol>
- *
- * <h2>消费并行度(consumer-threads)</h2>
- * poller 只做 poll / 分派 / 提交; 记录按<b>分区</b>哈希到固定 worker 并行处理。
- * 顺序保证是<b>分区内有序</b>: 广播 record 的 key 恒为 MQTT 主题, 同主题必落同分区,
- * 同分区固定同一个 worker 串行处理; 但 producer 重试可能把重试批次排到后续批次之后,
- * 跨节点只承诺尽力有序, 不承诺同主题严格有序。位点提交只领先于「已连续完成」的部分
- * ({@link PartitionProgressTracker}), 至少一次语义与串行时代等价。
- *
- * <h2>数据面: 上行出口</h2>
- * 命中 {@code uplink-filters} 的消息额外写入 {@code uplink-topic}, 供下游消费。
- * 若 {@code uplink-exclusive=true}, 这类消息<b>只</b>走数据面、不再进集群广播 ——
- * 适用于订阅者集中在云端而非分布在各 broker 的拓扑, 可把扇出从 N 倍降到 1 倍。
+ * <p>本类负责: 上行/广播的匹配与分流、记录编码(ClusterRecords)、生命周期、指标。
+ * 入队永不阻塞发布路径; 消费线程各自容错自愈。
  */
 @Component
 @ConditionalOnProperty(prefix = "jmqtt.broker.kafka", name = "enabled", havingValue = "true")
@@ -94,19 +54,12 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
 
     private static final Logger log = LoggerFactory.getLogger(KafkaClusterBus.class);
 
-    /** 单次批量取出的最大记录数 */
-    private static final int SEND_BATCH_SIZE = 500;
-
     private final BrokerProperties properties;
-    private final InternalSendServer internalSendServer;
-    private final TakeoverListener takeoverListener;
-    private final online.ipuff.jmqtt.subscribe.ISubscribeStoreService subscribeStoreService;
+    private final KafkaMessageProducer producer;
+    private final KafkaClusterConsumer clusterConsumer;
+    private final KafkaDownlinkConsumer downlinkConsumer;
 
-    /**
-     * 出站队列: publish() 只做入队, 由独立线程消费。
-     * 包可见: 同包测试要校验出站 record 的 key 约定(key=主题)。
-     */
-    final BlockingQueue<ProducerRecord<String, byte[]>> outbox;
+    private volatile boolean running;
 
     /** 上行过滤器匹配树; 过滤器为空时 uplinkAll = true */
     private final TopicTrie<Boolean> uplinkTrie = new TopicTrie<>();
@@ -118,56 +71,30 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
      */
     private final java.util.List<RouteMatcher> routeMatchers = new java.util.ArrayList<>();
 
-    /**
-     * 广播过滤器匹配树。与上行过滤器共用同一套通配符语义(而不是字符串前缀判断) ——
-     * 配 {@code device/+/telemetry} 就应该真的按 MQTT 通配符匹配,
-     * 否则「配置写的」和「实际执行的」是两回事。
-     */
+    /** 广播过滤器匹配树(与上行过滤器同一套通配符语义) */
     private final TopicTrie<Boolean> broadcastTrie = new TopicTrie<>();
     private volatile boolean broadcastAll = true;
 
-    private volatile KafkaProducer<String, byte[]> producer;
-    private volatile KafkaConsumer<String, byte[]> consumer;
-    private volatile Thread senderThread;
-    private volatile Thread consumerThread;
-    /** 消费 worker 池: 记录按分区哈希到固定 worker, 同分区严格串行(有序), 不同分区并行 */
-    private volatile Worker[] workers;
-    /** 分区完成位点跟踪: 并行消费下「至少一次」的提交依据 */
-    private volatile PartitionProgressTracker tracker;
-    private volatile boolean running;
-
-    /** 消费 worker 数(consumer-threads); 用于指标展示, 启动时确定 */
-    private volatile int workerCount;
-
-    /** 下行消费者(后台 → broker): 每节点独立 group, 只做本地投递 */
-    private volatile KafkaConsumer<String, byte[]> downlinkConsumer;
-    private volatile Thread downlinkThread;
-    /** 下行 worker 池: 与消息面 dispatch 同构 —— 按分区固定 worker, 同设备(同分区)保序 */
-    private volatile Worker[] downlinkWorkers;
-    /** 下行分区完成位点跟踪: 并行消费下「连续完成」才提交, 与消息面同一至少一次语义 */
-    private volatile PartitionProgressTracker downlinkTracker;
-
-    private final AtomicLong publishedCount = new AtomicLong();
-    private final AtomicLong droppedCount = new AtomicLong();
-    private final AtomicLong receivedCount = new AtomicLong();
-    private final AtomicLong skippedSelfCount = new AtomicLong();
     private final AtomicLong uplinkCount = new AtomicLong();
-    private final AtomicLong takeoverAppliedCount = new AtomicLong();
     private final AtomicLong broadcastSkippedCount = new AtomicLong();
-    private final AtomicLong skippedNoLocalSubCount = new AtomicLong();
 
     public KafkaClusterBus(BrokerProperties properties,
                            InternalSendServer internalSendServer,
-                           TakeoverListener takeoverListener,
-                           online.ipuff.jmqtt.subscribe.ISubscribeStoreService subscribeStoreService) {
+                           ISubscribeStoreService subscribeStoreService) {
         this.properties = properties;
-        this.internalSendServer = internalSendServer;
-        this.takeoverListener = takeoverListener;
-        this.subscribeStoreService = subscribeStoreService;
-        this.outbox = new ArrayBlockingQueue<>(properties.kafka().queueCapacity());
+        this.producer = new KafkaMessageProducer(properties);
+        this.clusterConsumer = new KafkaClusterConsumer(properties, internalSendServer, subscribeStoreService);
+        List<String> downlinkTopics = KafkaDownlinkConsumer.topicsOf(properties.kafka());
+        this.downlinkConsumer = downlinkTopics.isEmpty()
+                ? null : new KafkaDownlinkConsumer(properties, internalSendServer, downlinkTopics);
         initUplinkMatcher();
         initBroadcastMatcher();
         initRouteMatchers();
+    }
+
+    /** 测试用: 出站队列(同包可见, 校验 record 结构)。 */
+    BlockingQueue<ProducerRecord<String, byte[]>> outbox() {
+        return producer.outbox;
     }
 
     /** 解析多路由上行配置; 非法过滤器忽略并告警(与广播过滤器同一口径) */
@@ -277,7 +204,7 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
         // 消息面 key 恒为 MQTT 主题 —— 「同主题必落同分区, 分区内有序 ⇒ 同主题有序」
         // 这条链的起点。数据面的 uplink-key(按设备分区)只属于数据面, 不得泄漏进来:
         // 否则改一个数据面参数会悄悄破坏消息面的顺序保证。
-        enqueue(ClusterRecords.toRecord(topic, message), message.topic());
+        producer.enqueue(ClusterRecords.toRecord(topic, message), message.topic());
     }
 
     @Override
@@ -340,7 +267,8 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
                 String key = matcher.route.keyByDevice()
                         && message.clientId() != null && !message.clientId().isBlank()
                         ? message.clientId() : message.topic();
-                enqueue(ClusterRecords.toRoutedRecord(matcher.route.topic(), key, message), message.topic());
+                producer.enqueue(ClusterRecords.toRoutedRecord(matcher.route.topic(), key, message),
+                        message.topic());
                 sent++;
             }
             if (sent > 0) {
@@ -355,7 +283,7 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
         }
         // 数据面分区键按 uplink-key 配置: topic(默认)或 device(每设备自身时序有序 + 流量散开)
         String partitionKey = properties.kafka().uplinkPartitionKey(message.clientId(), message.topic());
-        enqueue(ClusterRecords.toRoutedRecord(topic, partitionKey, message), message.topic());
+        producer.enqueue(ClusterRecords.toRoutedRecord(topic, partitionKey, message), message.topic());
     }
 
     @Override
@@ -365,42 +293,20 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
             return;
         }
         // key=clientId 由 connectionEventRecord 保证: 同一客户端的事件严格有序
-        enqueue(ClusterRecords.connectionEventRecord(topic, event),
+        producer.enqueue(ClusterRecords.connectionEventRecord(topic, event),
                 "connection-event:" + event.action() + ":" + event.clientid());
     }
 
     @Override
     public void publishTakeover(String clientId, String targetNodeId) {
-        String topic = properties.kafka().clusterTopic();
-        enqueue(ClusterRecords.takeoverRecord(topic,
-                new ClusterRecords.Takeover(clientId, targetNodeId, properties.id())), clientId);
-    }
-
-    private void enqueue(ProducerRecord<String, byte[]> record, String description) {
-        if (outbox.offer(record)) {
-            publishedCount.incrementAndGet();
-            return;
-        }
-        // 队列已满: 丢弃优先于阻塞。跨节点投递是尽力而为, 本节点投递必须畅通。
-        long dropped = droppedCount.incrementAndGet();
-        if (dropped == 1 || dropped % 1000 == 0) {
-            log.warn("Kafka 出站队列已满, 已丢弃 {} 条消息。上游可能过载或 Kafka 不可用",
-                    dropped);
-        }
-        if (log.isDebugEnabled()) {
-            log.debug("丢弃消息: {}", description);
-        }
+        // 统一 JSON 结构里没有控制指令的传输通道
+        log.warn("无法通知节点 [{}] 释放 clientId={}: 当前 Kafka 记录结构不承载跨节点接管指令",
+                targetNodeId, clientId);
     }
 
     // ------------------------------------------------------------------
     // 生命周期
     // ------------------------------------------------------------------
-
-    /** 单个消费 worker 的待处理队列容量: 队列满时 poller 阻塞(背压), 而不是丢弃 */
-    private static final int WORKER_QUEUE_CAPACITY = 1000;
-
-    /** 消费循环异常后重建 consumer 的退避时长 */
-    private static final long RESTART_BACKOFF_MS = 5_000;
 
     @Override
     public void start() {
@@ -409,44 +315,29 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
         }
         BrokerProperties.KafkaProperties kafka = properties.kafka();
         String brokerId = properties.id();
-
         try {
-            this.producer = new KafkaProducer<>(producerConfig(kafka, brokerId));
-            this.consumer = new KafkaConsumer<>(consumerConfig(kafka, brokerId));
-        } catch (KafkaException e) {
+            producer.start();
+            clusterConsumer.start();
+            if (downlinkConsumer != null) {
+                downlinkConsumer.start();
+            }
+        } catch (Exception e) {
             // 启动期 Kafka 不可用不应导致 broker 起不来, 但必须让运维明确知道
             log.error("Kafka 客户端初始化失败, 集群功能不可用。本地投递不受影响", e);
-            closeQuietly();
+            stopQuietly();
             return;
         }
-
-        // 分区被撤销时: 先把已完成部分同步提交, 再丢弃该分区的位点状态
-        this.tracker = new PartitionProgressTracker();
-        subscribeClusterTopic(this.consumer);
-        this.running = true;
-
-        this.senderThread = new Thread(this::sendLoop, "jmqtt-kafka-sender");
-        this.senderThread.setDaemon(true);
-        this.senderThread.start();
-
-        int workerCount = kafka.consumerThreadsOrDefault();
-        this.workerCount = workerCount;
-        this.workers = new Worker[workerCount];
-        for (int i = 0; i < workerCount; i++) {
-            this.workers[i] = new Worker("jmqtt-kafka-worker-" + i);
-            this.workers[i].start();
-        }
-
-        this.consumerThread = new Thread(this::consumeLoop, "jmqtt-kafka-consumer");
-        this.consumerThread.setDaemon(true);
-        this.consumerThread.start();
-
-        startDownlinkIfNeeded(kafka, brokerId);
+        running = true;
 
         log.info("Kafka 集群总线已启动: clusterTopic={} groupId={} consumerThreads={} uplinkTopic={} uplinkExclusive={}",
-                kafka.clusterTopic(), kafka.resolvedGroupId(brokerId), workerCount,
+                kafka.clusterTopic(), kafka.resolvedGroupId(brokerId), clusterConsumer.workerCount(),
                 kafka.uplinkEnabled() ? kafka.uplinkTopic() : "(未启用)",
                 kafka.uplinkExclusive());
+        if (downlinkConsumer != null) {
+            log.info("下行通道已启动: topics={} groupId={}(每节点独立, 只做本地投递) downlinkWorkers={}",
+                    KafkaDownlinkConsumer.topicsOf(kafka), kafka.resolvedGroupId(brokerId) + "-downlink",
+                    downlinkConsumer.workerCount());
+        }
         if ("jmqtt".equals(brokerId)) {
             // 默认 id 是集群里最隐蔽的坑: 所有节点同 id ⇒ 同消费组(广播退化为分摊),
             // 且收端跳过"自己"的消息时会把每个节点的消息都当自己的丢掉 —— 集群全哑
@@ -464,29 +355,32 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
         }
         running = false;
         log.info("正在停止 Kafka 集群总线 ...");
+        clusterConsumer.stop();
+        if (downlinkConsumer != null) {
+            downlinkConsumer.stop();
+        }
+        producer.stop();
+        log.info("Kafka 集群总线已停止.");
+    }
 
-        if (consumer != null) {
-            consumer.wakeup();
+    private void stopQuietly() {
+        try {
+            clusterConsumer.stop();
+        } catch (Exception e) {
+            log.debug("停止集群消费者异常", e);
         }
         if (downlinkConsumer != null) {
-            downlinkConsumer.wakeup();
-        }
-        joinQuietly(consumerThread);
-        joinQuietly(senderThread);
-        joinQuietly(downlinkThread);
-        // joinQuietly 超时(排干耗时 > 3s)时的兜底: 显式等 worker 收尾, 再关客户端
-        drainDownlinkWorkers();
-
-        // 停止前尽力把队列里剩下的消息发出去
-        try {
-            if (producer != null) {
-                producer.flush();
+            try {
+                downlinkConsumer.stop();
+            } catch (Exception e) {
+                log.debug("停止下行消费者异常", e);
             }
-        } catch (Exception e) {
-            log.warn("关闭前 flush 失败", e);
         }
-        closeQuietly();
-        log.info("Kafka 集群总线已停止.");
+        try {
+            producer.stop();
+        } catch (Exception e) {
+            log.debug("停止生产者异常", e);
+        }
     }
 
     @Override
@@ -500,651 +394,31 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
     }
 
     // ------------------------------------------------------------------
-    // 发送线程
+    // 指标
     // ------------------------------------------------------------------
 
-    private void sendLoop() {
-        List<ProducerRecord<String, byte[]>> batch = new ArrayList<>(SEND_BATCH_SIZE);
-        while (running) {
-            try {
-                batch.clear();
-                int drained = outbox.drainTo(batch, SEND_BATCH_SIZE);
-                if (drained == 0) {
-                    ProducerRecord<String, byte[]> single = outbox.poll(200, TimeUnit.MILLISECONDS);
-                    if (single == null) {
-                        continue;
-                    }
-                    batch.add(single);
-                }
-                KafkaProducer<String, byte[]> p = producer;
-                if (p == null) {
-                    continue;
-                }
-                // send() 是异步的, 这里连续调用让生产者在 linger 窗口内自行攒批
-                for (ProducerRecord<String, byte[]> record : batch) {
-                    p.send(record, (metadata, exception) -> {
-                        if (exception != null) {
-                            log.debug("Kafka 发送失败 topic={}", record.topic(), exception);
-                        }
-                    });
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
-            } catch (Exception e) {
-                log.warn("Kafka 发送线程异常, 继续运行", e);
-            }
-        }
+    @Override
+    public Map<String, Long> stats() {
+        Map<String, Long> stats = new LinkedHashMap<>();
+        stats.put("published", producer.published());
+        stats.put("dropped", producer.dropped());
+        stats.put("received", clusterConsumer.received());
+        stats.put("skippedSelf", clusterConsumer.skippedSelf());
+        stats.put("skippedNoLocalSub", clusterConsumer.skippedNoLocalSub());
+        stats.put("uplink", uplinkCount.get());
+        // 因广播开关/过滤器而未进消息面的条数。它是「这个开关省下了多少」的唯一量化口径,
+        // 也是排查「消息为什么没跨节点」时的第一位数
+        stats.put("broadcastSkipped", broadcastSkippedCount.get());
+        stats.put("consumerThreads", (long) clusterConsumer.workerCount());
+        stats.put("downlinkWorkers", downlinkConsumer == null ? 0L : (long) downlinkConsumer.workerCount());
+        stats.put("outboxSize", producer.outboxSize());
+        stats.put("outboxCapacity", producer.outboxCapacity());
+        return stats;
     }
 
     // ------------------------------------------------------------------
-    // 消费线程
+    // 路由匹配
     // ------------------------------------------------------------------
-
-    /** 订阅集群主题并挂上分区撤销回调(启动与重建共用同一段逻辑)。 */
-    private void subscribeClusterTopic(KafkaConsumer<String, byte[]> c) {
-        c.subscribe(List.of(properties.kafka().clusterTopic()), new ConsumerRebalanceListener() {
-            @Override
-            public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
-                commitProgress(true);
-                PartitionProgressTracker progress = tracker;
-                if (progress != null) {
-                    progress.clear(partitions);
-                }
-                if (!partitions.isEmpty()) {
-                    log.info("分区被撤销, 已提交完成位点并重置跟踪: {}", partitions);
-                }
-            }
-
-            @Override
-            public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
-                // 位点由已提交 offset / auto-offset-reset 决定, 无需处理
-            }
-        });
-    }
-
-    /**
-     * 消费线程(poller): 只做三件事 —— poll、按分区分派、提交位点。
-     * 记录的处理全在 worker 上, poller 永不执行业务逻辑。
-     *
-     * <p><b>线程不许死。</b>任何异常只中断「这一轮消费」: 退避后重建 consumer 继续。
-     * 旧实现 catch 一下就退出线程, 而节点对外服务一切正常 —— 集群消息面静默停摆,
-     * 只有一行 ERROR 提示, 直到进程重启才恢复。消费循环必须自我修复。
-     */
-    private void consumeLoop() {
-        try {
-            while (running) {
-                try {
-                    consumeLoopOnce();
-                    return; // running=false 的正常退出
-                } catch (WakeupException e) {
-                    if (!running) {
-                        return;
-                    }
-                    // 意外唤醒: consumer 本身没坏, 继续用
-                    log.warn("Kafka 消费线程被意外唤醒, 继续消费", e);
-                } catch (Throwable t) {
-                    if (!running) {
-                        return;
-                    }
-                    log.error("Kafka 消费循环异常, {}ms 后重建 consumer 重试(本地投递不受影响)",
-                            RESTART_BACKOFF_MS, t);
-                }
-                // 走到这里 = 异常退出: KafkaConsumer 出错后不可复用, 换新的再战
-                restartConsumer();
-            }
-        } finally {
-            // 停止顺序: 先排干 worker(在途消息处理完) → 同步提交最后一批位点 → 关客户端。
-            // 都在本线程执行 —— KafkaConsumer 只允许被所属线程访问。
-            drainWorkers();
-            commitProgressQuietly();
-            closeConsumerQuietly();
-        }
-    }
-
-    /** 一轮消费: poll → 分派 → 提交, 直到 {@code running=false}。 */
-    private void consumeLoopOnce() {
-        KafkaConsumer<String, byte[]> c = consumer;
-        if (c == null) {
-            return;
-        }
-        Duration pollTimeout = Duration.ofMillis(properties.kafka().pollTimeoutMs());
-        while (running) {
-            ConsumerRecords<String, byte[]> records = c.poll(pollTimeout);
-            if (!records.isEmpty()) {
-                dispatch(records);
-                // 异步提交已完成位点; 失败无害 —— 下一次 drain 会带上更大的位点重试
-                commitProgress(false);
-            }
-        }
-    }
-
-    /**
-     * 异常后重建 consumer: 关旧 → 退避 → 建新 → 重新订阅。
-     * 位点状态一并重置, 从上次提交处重新拉 —— 至少一次语义下最多重复, 不会跳过。
-     */
-    private void restartConsumer() {
-        closeConsumerQuietly();
-        while (running) {
-            try {
-                this.tracker = new PartitionProgressTracker();
-                KafkaConsumer<String, byte[]> fresh =
-                        new KafkaConsumer<>(consumerConfig(properties.kafka(), properties.id()));
-                subscribeClusterTopic(fresh);
-                this.consumer = fresh;
-                log.info("Kafka consumer 已重建, 集群消息面恢复");
-                return;
-            } catch (Exception e) {
-                log.error("Kafka consumer 重建失败, {}ms 后重试", RESTART_BACKOFF_MS, e);
-                if (!sleepQuietly(RESTART_BACKOFF_MS)) {
-                    return;
-                }
-            }
-        }
-    }
-
-    /** 只关消息面 consumer(producer/下行不动)。只允许在消费线程调用。 */
-    private void closeConsumerQuietly() {
-        KafkaConsumer<String, byte[]> c = consumer;
-        consumer = null;
-        if (c != null) {
-            try {
-                c.close(Duration.ofSeconds(3));
-            } catch (Exception e) {
-                log.debug("关闭 consumer 异常", e);
-            }
-        }
-    }
-
-    /** 退避等待; 被打断或收到停止信号返回 false。 */
-    private static boolean sleepQuietly(long millis) {
-        try {
-            Thread.sleep(millis);
-            return true;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return false;
-        }
-    }
-
-    /** 停止序列里的最后提交: 失败只记日志, 不能挡住 consumer 关闭。 */
-    private void commitProgressQuietly() {
-        try {
-            commitProgress(true);
-        } catch (Exception e) {
-            log.debug("停止时位点提交失败(忽略)", e);
-        }
-    }
-
-    /**
-     * 按分区分派到固定 worker。广播 record 的 key 恒为 MQTT 主题,
-     * 同主题必落同分区 ⇒ 同分区的 FIFO 队列就是同主题的顺序。
-     * 但顺序保证只有「分区内有序」—— producer 重试可能乱序,
-     * 跨节点是尽力有序, 不承诺同主题严格有序。
-     */
-    private void dispatch(ConsumerRecords<String, byte[]> records) {
-        Worker[] pool = workers;
-        PartitionProgressTracker progress = tracker;
-        if (pool == null || progress == null) {
-            return;
-        }
-        for (ConsumerRecord<String, byte[]> record : records) {
-            TopicPartition tp = new TopicPartition(record.topic(), record.partition());
-            long offset = record.offset();
-            progress.submitted(tp, offset);
-            Worker worker = pool[Math.floorMod(tp.partition(), pool.length)];
-            try {
-                worker.submit(() -> {
-                    try {
-                        handle(record);
-                    } catch (Exception e) {
-                        // worker 不能因单条坏记录退出; 位点照常推进(跳过), 与串行时代的容错一致
-                        log.warn("集群记录处理异常, 跳过 topic={} partition={} offset={}",
-                                record.topic(), record.partition(), record.offset(), e);
-                    } finally {
-                        progress.completed(tp, offset);
-                    }
-                });
-            } catch (InterruptedException e) {
-                // 停止中: 未处理也标记完成, 避免该分区位点永久卡住
-                Thread.currentThread().interrupt();
-                progress.completed(tp, offset);
-                return;
-            }
-        }
-    }
-
-    /**
-     * 提交「已连续完成」的位点。至少一次语义: 提交只领先于完成部分,
-     * 宕机重放最多重复投递已处理消息, 绝不跳过未处理的。
-     * 只允许在消费线程调用(poll 循环 / rebalance 回调 / 停止序列)。
-     */
-    private void commitProgress(boolean sync) {
-        KafkaConsumer<String, byte[]> c = consumer;
-        PartitionProgressTracker progress = tracker;
-        if (c == null || progress == null) {
-            return;
-        }
-        Map<TopicPartition, OffsetAndMetadata> offsets = progress.drainCommittable();
-        if (offsets.isEmpty()) {
-            return;
-        }
-        if (sync) {
-            c.commitSync(offsets);
-        } else {
-            c.commitAsync(offsets, (off, ex) -> {
-                if (ex != null) {
-                    log.debug("位点异步提交失败, 将随下次提交重试", ex);
-                }
-            });
-        }
-    }
-
-    /** 等待 worker 队列排干并退出(running=false 后 worker 处理完剩余任务即自行结束) */
-    private void drainWorkers() {
-        Worker[] pool = workers;
-        if (pool == null) {
-            return;
-        }
-        for (Worker worker : pool) {
-            worker.joinQuietly();
-        }
-    }
-
-    /**
-     * 单个消费 worker: 一条 FIFO 队列 + 一个线程。
-     * 队列满时 {@link #submit} 阻塞 poller —— 背压上游而不是丢弃跨节点消息。
-     */
-    private final class Worker {
-
-        private final BlockingQueue<Runnable> queue = new ArrayBlockingQueue<>(WORKER_QUEUE_CAPACITY);
-        private final Thread thread;
-
-        Worker(String name) {
-            this.thread = new Thread(this::loop, name);
-            this.thread.setDaemon(true);
-        }
-
-        void start() {
-            thread.start();
-        }
-
-        void submit(Runnable task) throws InterruptedException {
-            queue.put(task);
-        }
-
-        private void loop() {
-            while (true) {
-                try {
-                    Runnable task = queue.poll(200, TimeUnit.MILLISECONDS);
-                    if (task == null) {
-                        // 已停止且队列排干 → 退出; 仍在运行则继续等下一批
-                        if (!running && queue.isEmpty()) {
-                            return;
-                        }
-                        continue;
-                    }
-                    task.run();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    return;
-                }
-            }
-        }
-
-        void joinQuietly() {
-            try {
-                thread.join(5000);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        }
-    }
-
-    private void handle(ConsumerRecord<String, byte[]> record) {
-        // 同一条 topic 上混跑两类记录: 普通消息与控制指令
-        if (ClusterRecords.kind(record) == ClusterRecords.Kind.TAKEOVER) {
-            handleTakeover(record);
-            return;
-        }
-        handlePublish(record);
-    }
-
-    /**
-     * 处理连接接管指令。
-     *
-     * <p>这是<b>定向</b>消息: 只有目标节点才执行, 其他节点直接跳过 ——
-     * 否则所有节点都会去关一个自己并没有的连接(虽然是无害的 no-op, 但日志会很难看)。
-     */
-    private void handleTakeover(ConsumerRecord<String, byte[]> record) {
-        ClusterRecords.Takeover takeover = ClusterRecords.takeover(record);
-        if (takeover == null) {
-            log.debug("丢弃无法解码的接管指令, offset={}", record.offset());
-            return;
-        }
-        if (!properties.id().equals(takeover.targetNodeId())) {
-            // 不是发给本节点的, 静默跳过
-            return;
-        }
-        takeoverAppliedCount.incrementAndGet();
-        log.info("处理跨节点接管指令: clientId={} 接管方={}", takeover.clientId(), takeover.fromNodeId());
-        // 与普通消息一样, 这里只做本节点处理, 绝不回写出站(无回环风险)
-        takeoverListener.onTakeover(takeover.clientId(), takeover.fromNodeId());
-    }
-
-    private void handlePublish(ConsumerRecord<String, byte[]> record) {
-        // 早期过滤: Kafka record 的 key 即 MQTT 主题。先查本地订阅树,
-        // 无匹配订阅者则跳过反序列化和投递 —— 30 万连接下大多数消息
-        // 只涉及本节点 1~2 个订阅者, 远端节点的无效消费占了大量 CPU。
-        String topic = record.key();
-        if (topic != null && !subscribeStoreService.hasSubscribers(topic)) {
-            skippedNoLocalSubCount.incrementAndGet();
-            return;
-        }
-        InternalMessage message = ClusterRecords.fromRecord(record);
-        if (message == null) {
-            log.debug("丢弃无法解码的集群记录, offset={}", record.offset());
-            return;
-        }
-        // 关键: 跳过本节点自己发出的消息。
-        // 发布路径已经完成过一次本地投递, 再取回来会重复投递。
-        if (properties.id().equals(message.brokerId())) {
-            skippedSelfCount.incrementAndGet();
-            return;
-        }
-        receivedCount.incrementAndGet();
-        // 只做本节点投递。绝不调用出站路径 —— 这是回环防护的结构性保证。
-        int delivered = internalSendServer.sendPublishMessage(message);
-        if (log.isDebugEnabled()) {
-            log.debug("总线消息投递: from={} topic={} 本节点投递={}",
-                    message.brokerId(), message.topic(), delivered);
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // 下行消费(后台 → broker)
-    // ------------------------------------------------------------------
-
-    /**
-     * 按配置启动下行通道。每个通道一条约定的 record 契约:
-     * key(或 jmqtt-topic header)= 目标 MQTT 主题, value = payload,
-     * 可选 jmqtt-qos / jmqtt-retain header 覆盖通道默认值。
-     *
-     * <p>worker 池与消息面同构(consumer-threads, 缺省 2×核数): 按分区固定 worker,
-     * 同设备(key=deviceId)恒落同分区 ⇒ 设备内投递严格有序。容量压测证明
-     * 单线程下行在逐条回显的对称流量下 ≈5.5k msg/s 封顶, 并行化后上限随分区数展开。
-     */
-    private void startDownlinkIfNeeded(BrokerProperties.KafkaProperties kafka, String brokerId) {
-        java.util.List<String> topics = new java.util.ArrayList<>();
-        for (BrokerProperties.KafkaProperties.Downlink downlink : downlinksOf(kafka)) {
-            topics.add(downlink.topic());
-        }
-        if (topics.isEmpty()) {
-            return;
-        }
-        Map<String, Object> cfg = consumerConfig(kafka, brokerId);
-        cfg.put(ConsumerConfig.GROUP_ID_CONFIG, kafka.resolvedGroupId(brokerId) + "-downlink");
-        cfg.put(ConsumerConfig.CLIENT_ID_CONFIG, prefix(kafka) + "-" + brokerId + "-downlink");
-        this.downlinkConsumer = new KafkaConsumer<>(cfg);
-        int count = kafka.consumerThreadsOrDefault();
-        this.downlinkWorkers = new Worker[count];
-        for (int i = 0; i < count; i++) {
-            this.downlinkWorkers[i] = new Worker("jmqtt-kafka-downlink-worker-" + i);
-            this.downlinkWorkers[i].start();
-        }
-        this.downlinkTracker = new PartitionProgressTracker();
-        // 分区被撤销时: 先同步提交已完成部分, 再丢弃该分区的位点状态 —— 与消息面同一口径
-        this.downlinkConsumer.subscribe(topics, new ConsumerRebalanceListener() {
-            @Override
-            public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
-                commitDownlinkProgress(true);
-                PartitionProgressTracker tracker = downlinkTracker;
-                if (tracker != null) {
-                    tracker.clear(partitions);
-                }
-            }
-
-            @Override
-            public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
-                // 位点由已提交 offset / auto-offset-reset 决定, 无需处理
-            }
-        });
-        this.downlinkThread = new Thread(this::downlinkLoop, "jmqtt-kafka-downlink");
-        this.downlinkThread.setDaemon(true);
-        this.downlinkThread.start();
-        log.info("下行通道已启动: topics={} groupId={}(每节点独立, 只做本地投递) downlinkWorkers={}",
-                topics, kafka.resolvedGroupId(brokerId) + "-downlink", count);
-    }
-
-    /** 过滤出合法的下行通道配置 */
-    private static java.util.List<BrokerProperties.KafkaProperties.Downlink> downlinksOf(
-            BrokerProperties.KafkaProperties kafka) {
-        java.util.List<BrokerProperties.KafkaProperties.Downlink> result = new java.util.ArrayList<>();
-        if (kafka.downlink() == null) {
-            return result;
-        }
-        for (BrokerProperties.KafkaProperties.Downlink downlink : kafka.downlink()) {
-            if (downlink.topic() == null || downlink.topic().isBlank()) {
-                log.warn("忽略未配置 topic 的下行通道: {}", downlink);
-                continue;
-            }
-            result.add(downlink);
-        }
-        return result;
-    }
-
-    /**
-     * 下行消费 poller。与消息面 {@link #consumeLoop} 同构: 只做 poll / 分派 / 提交,
-     * 记录按分区哈希到固定 worker 并行处理。
-     *
-     * <p>原实现是单线程串行, 设计假设「指令类流量天然低频」; 容量压测证明
-     * 逐条回显的对称流量会在这一环封顶(实测 ≈5.5k msg/s), 故改为并行。
-     * 有序性不受影响: 下行 record 的 key 是设备标识或主题, 同 key 恒落同分区
-     * ⇒ 同分区固定同一个 worker, 设备内严格有序, 并行只发生在不同分区之间。
-     *
-     * <p><b>回环防护是结构性的</b>: worker 里只调用
-     * {@link InternalSendServer#sendPublishMessage} 做本地投递,
-     * 绝不经过出站路径 —— 后台从上行拿到消息再下发, 不会绕回 Kafka。
-     */
-    private void downlinkLoop() {
-        try {
-            while (running) {
-                try {
-                    downlinkLoopOnce();
-                    return; // running=false 的正常退出
-                } catch (WakeupException e) {
-                    if (!running) {
-                        return;
-                    }
-                    log.warn("下行消费线程被意外唤醒, 继续消费", e);
-                } catch (Throwable t) {
-                    if (!running) {
-                        return;
-                    }
-                    log.error("下行消费循环异常, {}ms 后重建 consumer 重试(本地投递不受影响)",
-                            RESTART_BACKOFF_MS, t);
-                }
-                restartDownlinkConsumer();
-            }
-        } finally {
-            // 停止顺序与消息面一致: 先排干 worker(在途处理完) → 同步提交最后一批位点;
-            // 消费者由 closeQuietly 统一关闭
-            drainDownlinkWorkers();
-            try {
-                commitDownlinkProgress(true);
-            } catch (Exception e) {
-                log.debug("停止时下行位点提交失败(忽略)", e);
-            }
-        }
-    }
-
-    /** 一轮下行消费: poll → 分派 → 提交, 直到 {@code running=false}。 */
-    private void downlinkLoopOnce() {
-        KafkaConsumer<String, byte[]> c = downlinkConsumer;
-        if (c == null) {
-            return;
-        }
-        Duration pollTimeout = Duration.ofMillis(properties.kafka().pollTimeoutMs());
-        while (running) {
-            ConsumerRecords<String, byte[]> records = c.poll(pollTimeout);
-            if (!records.isEmpty()) {
-                dispatchDownlink(records);
-                commitDownlinkProgress(false);
-            }
-        }
-    }
-
-    /** 异常后重建下行 consumer: 关旧 → 退避 → 建新 → 重新订阅。 */
-    private void restartDownlinkConsumer() {
-        closeDownlinkConsumerQuietly();
-        while (running) {
-            try {
-                this.downlinkTracker = new PartitionProgressTracker();
-                KafkaConsumer<String, byte[]> fresh = newDownlinkConsumer();
-                this.downlinkConsumer = fresh;
-                log.info("下行 consumer 已重建, 后台下发恢复");
-                return;
-            } catch (Exception e) {
-                log.error("下行 consumer 重建失败, {}ms 后重试", RESTART_BACKOFF_MS, e);
-                if (!sleepQuietly(RESTART_BACKOFF_MS)) {
-                    return;
-                }
-            }
-        }
-    }
-
-    /** 建新的下行 consumer 并订阅全部下行主题。 */
-    private KafkaConsumer<String, byte[]> newDownlinkConsumer() {
-        BrokerProperties.KafkaProperties kafka = properties.kafka();
-        Map<String, Object> cfg = consumerConfig(kafka, properties.id());
-        cfg.put(ConsumerConfig.GROUP_ID_CONFIG, kafka.resolvedGroupId(properties.id()) + "-downlink");
-        cfg.put(ConsumerConfig.CLIENT_ID_CONFIG, prefix(kafka) + "-" + properties.id() + "-downlink");
-        KafkaConsumer<String, byte[]> c = new KafkaConsumer<>(cfg);
-        java.util.List<String> topics = new java.util.ArrayList<>();
-        for (BrokerProperties.KafkaProperties.Downlink downlink : downlinksOf(kafka)) {
-            topics.add(downlink.topic());
-        }
-        c.subscribe(topics, new ConsumerRebalanceListener() {
-            @Override
-            public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
-                commitDownlinkProgress(true);
-                PartitionProgressTracker tracker = downlinkTracker;
-                if (tracker != null) {
-                    tracker.clear(partitions);
-                }
-            }
-
-            @Override
-            public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
-                // 位点由已提交 offset / auto-offset-reset 决定, 无需处理
-            }
-        });
-        return c;
-    }
-
-    /** 只关下行 consumer。只允许在下行线程调用。 */
-    private void closeDownlinkConsumerQuietly() {
-        KafkaConsumer<String, byte[]> d = downlinkConsumer;
-        downlinkConsumer = null;
-        if (d != null) {
-            try {
-                d.close(Duration.ofSeconds(3));
-            } catch (Exception e) {
-                log.debug("关闭下行 consumer 异常", e);
-            }
-        }
-    }
-
-    /**
-     * 按分区分派到固定下行 worker。同设备(key=deviceId)必落同分区 ⇒
-     * 同分区的 FIFO 队列就是该设备的投递顺序。队列满时背压 poller 而不是丢消息。
-     */
-    private void dispatchDownlink(ConsumerRecords<String, byte[]> records) {
-        Worker[] pool = downlinkWorkers;
-        PartitionProgressTracker progress = downlinkTracker;
-        if (pool == null || progress == null) {
-            return;
-        }
-        for (ConsumerRecord<String, byte[]> record : records) {
-            TopicPartition tp = new TopicPartition(record.topic(), record.partition());
-            long offset = record.offset();
-            progress.submitted(tp, offset);
-            Worker worker = pool[Math.floorMod(tp.partition(), pool.length)];
-            try {
-                worker.submit(() -> {
-                    try {
-                        handleDownlink(record);
-                    } catch (Exception e) {
-                        // worker 不能因单条坏记录退出; 位点照常推进(跳过), 与串行口径一致
-                        log.warn("下行记录处理异常, 跳过 topic={} partition={} offset={}",
-                                record.topic(), record.partition(), record.offset(), e);
-                    } finally {
-                        progress.completed(tp, offset);
-                    }
-                });
-            } catch (InterruptedException e) {
-                // 停止中: 未处理也标记完成, 避免该分区位点永久卡住
-                Thread.currentThread().interrupt();
-                progress.completed(tp, offset);
-                return;
-            }
-        }
-    }
-
-    /**
-     * 提交下行「已连续完成」的位点。至少一次语义: 提交只领先于完成部分,
-     * 宕机重放最多重复投递已处理消息, 绝不跳过未处理的。
-     * 只允许在下行 poller 线程调用(poll 循环 / rebalance 回调 / 停止序列)。
-     */
-    private void commitDownlinkProgress(boolean sync) {
-        KafkaConsumer<String, byte[]> c = downlinkConsumer;
-        PartitionProgressTracker progress = downlinkTracker;
-        if (c == null || progress == null) {
-            return;
-        }
-        Map<TopicPartition, OffsetAndMetadata> offsets = progress.drainCommittable();
-        if (offsets.isEmpty()) {
-            return;
-        }
-        if (sync) {
-            c.commitSync(offsets);
-        } else {
-            c.commitAsync(offsets, (off, ex) -> {
-                if (ex != null) {
-                    log.debug("下行位点异步提交失败, 将随下次提交重试", ex);
-                }
-            });
-        }
-    }
-
-    /** 等待下行 worker 排干并退出(running=false 后 worker 处理完剩余任务即自行结束) */
-    private void drainDownlinkWorkers() {
-        Worker[] pool = downlinkWorkers;
-        if (pool == null) {
-            return;
-        }
-        for (Worker worker : pool) {
-            worker.joinQuietly();
-        }
-    }
-
-    private void handleDownlink(ConsumerRecord<String, byte[]> record) {
-        InternalMessage message = ClusterRecords.downlinkMessage(record);
-        if (message == null) {
-            log.debug("丢弃无法解码的下行记录: topic={} offset={}", record.topic(), record.offset());
-            return;
-        }
-        if (internalSendServer == null) {
-            return;
-        }
-        int delivered = internalSendServer.sendPublishMessage(message);
-        if (log.isDebugEnabled()) {
-            // 与入站报文日志同一规范: DOWNLINK 前缀 + key=value + payload 截断预览
-            log.debug("DOWNLINK clientId=unknown type=PUBLISH topic={} qos={} size={} 本地投递={} payload={}",
-                    message.topic(), message.qos(), message.payload().length, delivered,
-                    online.ipuff.jmqtt.util.Payloads.preview(message.payload()));
-        }
-    }
 
     /**
      * 单条上行路由的匹配器: 过滤器树 + 目标 topic + 分区键策略。
@@ -1180,113 +454,5 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
             return topic != null && !topic.isEmpty()
                     && trie.hasMatch(MqttTopic.levels(topic));
         }
-    }
-
-    // ------------------------------------------------------------------
-    // 配置
-    // ------------------------------------------------------------------
-
-    private Map<String, Object> producerConfig(BrokerProperties.KafkaProperties kafka, String brokerId) {
-        Map<String, Object> cfg = new HashMap<>();
-        cfg.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, kafka.bootstrapServers());
-        cfg.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
-        cfg.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
-        cfg.put(ProducerConfig.CLIENT_ID_CONFIG, prefix(kafka) + "-" + brokerId + "-producer");
-        cfg.put(ProducerConfig.ACKS_CONFIG, "1");
-        cfg.put(ProducerConfig.LINGER_MS_CONFIG, 5);
-        cfg.put(ProducerConfig.BATCH_SIZE_CONFIG, 16384);
-        cfg.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, kafka.compressionType());
-        // 关键: 元数据不可用时的最长阻塞。默认 60s 会直接卡住 MQTT 发布路径
-        cfg.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, kafka.maxBlockMs());
-        cfg.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, 10_000);
-        cfg.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, 5_000);
-        return cfg;
-    }
-
-    private Map<String, Object> consumerConfig(BrokerProperties.KafkaProperties kafka, String brokerId) {
-        Map<String, Object> cfg = new HashMap<>();
-        cfg.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, kafka.bootstrapServers());
-        cfg.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
-        cfg.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class);
-        // 每节点独立 group.id —— 这是广播语义的来源
-        cfg.put(ConsumerConfig.GROUP_ID_CONFIG, kafka.resolvedGroupId(brokerId));
-        cfg.put(ConsumerConfig.CLIENT_ID_CONFIG, prefix(kafka) + "-" + brokerId + "-consumer");
-        // 手动提交, 保证处理后才推进 offset
-        cfg.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
-        cfg.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, kafka.autoOffsetReset());
-        cfg.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 500);
-        cfg.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, 15_000);
-        return cfg;
-    }
-
-    private static String prefix(BrokerProperties.KafkaProperties kafka) {
-        return (kafka.clientIdPrefix() == null || kafka.clientIdPrefix().isBlank())
-                ? "jmqtt" : kafka.clientIdPrefix();
-    }
-
-    private void closeQuietly() {
-        KafkaProducer<String, byte[]> p = producer;
-        producer = null;
-        if (p != null) {
-            try {
-                p.close(Duration.ofSeconds(3));
-            } catch (Exception e) {
-                log.debug("关闭 producer 异常", e);
-            }
-        }
-        KafkaConsumer<String, byte[]> c = consumer;
-        consumer = null;
-        if (c != null) {
-            try {
-                c.close(Duration.ofSeconds(3));
-            } catch (Exception e) {
-                log.debug("关闭 consumer 异常", e);
-            }
-        }
-        KafkaConsumer<String, byte[]> d = downlinkConsumer;
-        downlinkConsumer = null;
-        if (d != null) {
-            try {
-                d.close(Duration.ofSeconds(3));
-            } catch (Exception e) {
-                log.debug("关闭下行 consumer 异常", e);
-            }
-        }
-    }
-
-    private static void joinQuietly(Thread thread) {
-        if (thread == null) {
-            return;
-        }
-        try {
-            thread.join(3000);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // 指标
-    // ------------------------------------------------------------------
-
-    @Override
-    public Map<String, Long> stats() {
-        Map<String, Long> stats = new LinkedHashMap<>();
-        stats.put("published", publishedCount.get());
-        stats.put("dropped", droppedCount.get());
-        stats.put("received", receivedCount.get());
-        stats.put("skippedSelf", skippedSelfCount.get());
-        stats.put("skippedNoLocalSub", skippedNoLocalSubCount.get());
-        stats.put("uplink", uplinkCount.get());
-        stats.put("takeoverApplied", takeoverAppliedCount.get());
-        // 因广播开关/过滤器而未进消息面的条数。它是「这个开关省下了多少」的唯一量化口径,
-        // 也是排查「消息为什么没跨节点」时的第一位数
-        stats.put("broadcastSkipped", broadcastSkippedCount.get());
-        stats.put("consumerThreads", (long) workerCount);
-        Worker[] dlPool = downlinkWorkers;
-        stats.put("downlinkWorkers", dlPool == null ? 0L : (long) dlPool.length);
-        stats.put("outboxSize", (long) outbox.size());
-        stats.put("outboxCapacity", (long) outbox.size() + outbox.remainingCapacity());
-        return stats;
     }
 }

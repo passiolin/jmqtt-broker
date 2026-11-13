@@ -44,7 +44,8 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  * @param peername        对端地址 ip:port
  * @param node            产生事件的接入节点(brokerId)
  * @param reason          下线原因, 仅 disconnected 事件: {@code closed}(客户端主动
- *                        DISCONNECT)或 {@code tcp_closed}(连接断开/心跳超时/被接管)
+ *                        DISCONNECT)、{@code keepalive_timeout}(keepalive 空闲超时)
+ *                        或 {@code tcp_closed}(其他异常断开/被接管)
  * @param connectedAt     上线时间(epoch millis), 仅 connected 事件
  * @param disconnectedAt  下线时间(epoch millis), 仅 disconnected 事件
  */
@@ -69,8 +70,11 @@ public record ConnectionEvent(
     /** 下线原因: 客户端主动发送了 DISCONNECT 报文 */
     public static final String REASON_CLOSED = "closed";
 
-    /** 下线原因: 连接断开 / 心跳超时 / 被接管等非优雅离线 */
+    /** 下线原因: 连接断开 / 被接管等非优雅离线 */
     public static final String REASON_TCP_CLOSED = "tcp_closed";
+
+    /** 下线原因: keepalive 空闲超时(一个 keepalive 周期内没有收到任何报文) */
+    public static final String REASON_KEEPALIVE_TIMEOUT = "keepalive_timeout";
 
     public static ConnectionEvent connected(String clientid, String username,
                                             int protoVersion, String peername, String node) {

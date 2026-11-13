@@ -28,6 +28,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -37,10 +38,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * 数据面与事件面的外部契约:
  * <ol>
- *   <li><b>多路由上行</b> —— 命中即发 JSON 信封, 一条消息命中多条路由就发多份,
+ *   <li><b>多路由上行</b> —— 命中即发一份 raw 记录, 一条消息命中多条路由就发多份,
  *       每条路由有自己的分区键; 未命中不发 Kafka、集群广播不受影响</li>
- *   <li><b>上行 JSON 信封</b> —— {username, topic, timestamp, qos, payload, node, clientid}</li>
- *   <li><b>下行 JSON 契约</b> —— {topic, qos?, payload}, qos 缺省用通道默认值</li>
+ *   <li><b>上行 raw 契约</b> —— value = 原始 payload 字节(零编解码), 零 header,
+ *       timestamp 用 Kafka 内建 record timestamp; 设备标识由分区键(key: device)承载,
+ *       MQTT 主题不随记录携带(key: topic 路由时即 key)</li>
+ *   <li><b>下行契约</b> —— JSON 结构: {"topic","qos","payload"}(payload 为
+ *       byte[], JSON 中 base64 承载); key 仅用于分区</li>
  *   <li><b>连接事件</b> —— connected/disconnected 字段集, key=clientId 有序</li>
  * </ol>
  */
@@ -61,11 +65,11 @@ class KafkaClusterBusRoutesTest {
 
     private static KafkaClusterBus bus(BrokerProperties.KafkaProperties kafka) {
         return new KafkaClusterBus(TestBrokerProperties.create("node-1", 32, 1000, kafka),
-                null, (clientId, fromNodeId) -> { }, new online.ipuff.jmqtt.subscribe.SubscribeStoreService());
+                null, new online.ipuff.jmqtt.subscribe.SubscribeStoreService());
     }
 
     private static ProducerRecord<String, byte[]> take(KafkaClusterBus bus) throws InterruptedException {
-        return bus.outbox.poll(2, TimeUnit.SECONDS);
+        return bus.outbox().poll(2, TimeUnit.SECONDS);
     }
 
     private static ConsumerRecord<String, byte[]> toConsumerRecord(ProducerRecord<String, byte[]> record) {
@@ -76,7 +80,7 @@ class KafkaClusterBusRoutesTest {
     }
 
     @Test
-    @DisplayName("命中多条路由: 每条路由各发一份 JSON 信封, 分区键按各自配置")
+    @DisplayName("命中多条路由: 每条路由各发一份完整结构记录, 分区键按各自配置")
     void multipleRoutesFanOut() throws InterruptedException {
         List<BrokerProperties.KafkaProperties.Route> routes = List.of(
                 new BrokerProperties.KafkaProperties.Route(
@@ -95,15 +99,22 @@ class KafkaClusterBusRoutesTest {
         assertEquals("device/42/telemetry", second.key(), "该路由配 key=topic");
         assertNull(take(bus), "只有命中数量的记录");
 
-        // 价值是 JSON 信封, 不是裸 payload
-        ClusterRecords.RoutedEnvelope envelope = ClusterRecords.routedEnvelope(first);
-        assertEquals("device/42/telemetry", envelope.topic());
-        assertEquals("x", envelope.payload());
-        assertEquals("device-42", envelope.clientid());
-        assertEquals("app-user", envelope.username());
-        assertEquals("node-1", envelope.node());
-        assertEquals(0, envelope.qos());
-        assertTrue(envelope.timestamp() > 0);
+        // 上行记录零 header, value = 完整结构(集群广播同一份)
+        assertFalse(first.headers().iterator().hasNext(), "上行记录不带任何 jmqtt header");
+        assertNotNull(first.timestamp(), "record timestamp 由 Kafka 内建承载");
+        InternalMessage decoded = ClusterRecords.fromRecord(toConsumerRecord(first));
+        assertNotNull(decoded);
+        assertEquals("device/42/telemetry", decoded.topic(), "topic 在结构里");
+        assertEquals("x", new String(decoded.payload(), StandardCharsets.UTF_8));
+        assertEquals("device-42", decoded.clientId());
+        assertEquals("node-1", decoded.brokerId(), "node = jmqtt-broker-id");
+        assertEquals("app-user", decoded.username());
+        assertEquals(0, decoded.qos());
+
+        assertFalse(second.headers().iterator().hasNext(), "第二路由同样零 header");
+        InternalMessage decodedSecond = ClusterRecords.fromRecord(toConsumerRecord(second));
+        assertNotNull(decodedSecond);
+        assertEquals("device/42/telemetry", decodedSecond.topic());
     }
 
     @Test
@@ -122,8 +133,8 @@ class KafkaClusterBusRoutesTest {
     }
 
     @Test
-    @DisplayName("旧的单路由配置(uplink-topic)同样产出 JSON 信封")
-    void legacySingleUlinkUsesEnvelope() throws InterruptedException {
+    @DisplayName("旧的单路由配置(uplink-topic)同样产出 raw 记录")
+    void legacySingleUplinkProducesRaw() throws InterruptedException {
         BrokerProperties.KafkaProperties kafka = new BrokerProperties.KafkaProperties(
                 true, "127.0.0.1:9092", "jmqtt", "jmqtt-cluster", null,
                 true, List.of(), "jmqtt-uplink", List.of("device/#"), false,
@@ -134,7 +145,29 @@ class KafkaClusterBusRoutesTest {
         bus.publishUplink(message("device-42", "device/42/telemetry"));
         ProducerRecord<String, byte[]> record = take(bus);
         assertEquals("jmqtt-uplink", record.topic());
-        assertNotNull(ClusterRecords.routedEnvelope(record), "单路由同样是 JSON 信封");
+        assertFalse(record.headers().iterator().hasNext(), "上行记录零 header");
+        InternalMessage decoded = ClusterRecords.fromRecord(toConsumerRecord(record));
+        assertNotNull(decoded);
+        assertEquals("x", new String(decoded.payload(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    @DisplayName("上行 raw: 二进制 payload 逐位原样, 不经 UTF-8/JSON 编解码")
+    void binaryPayloadSurvivesUplinkRaw() throws InterruptedException {
+        BrokerProperties.KafkaProperties kafka = new BrokerProperties.KafkaProperties(
+                true, "127.0.0.1:9092", "jmqtt", "jmqtt-cluster", null,
+                true, List.of(), "jmqtt-uplink", List.of("device/#"), false,
+                1000, 1000, 200, 1, "none", "latest", "topic", null, null, null);
+        KafkaClusterBus bus = bus(kafka);
+
+        byte[] payload = {0x22, 0x5C, (byte) 0xFF, 0x00, 0x0A};
+        bus.publishUplink(new InternalMessage("node-1", "device-42",
+                "device/42/telemetry", 1, payload, false, false, "app-user"));
+
+        ProducerRecord<String, byte[]> record = take(bus);
+        InternalMessage decoded = ClusterRecords.fromRecord(toConsumerRecord(record));
+        assertNotNull(decoded);
+        assertArrayEquals(payload, decoded.payload(), "引号/反斜杠/非法 UTF-8/NUL/换行 都不得被改动");
     }
 
     @Test
@@ -149,6 +182,7 @@ class KafkaClusterBusRoutesTest {
         ProducerRecord<String, byte[]> record = take(bus);
         assertEquals("jmqtt-client-events", record.topic());
         assertEquals("device-42", record.key(), "同一客户端的事件必须落同分区(有序)");
+        assertFalse(record.headers().iterator().hasNext(), "连接事件零 header, action 在 JSON 体里");
         ConnectionEvent decoded = ClusterRecords.connectionEvent(toConsumerRecord(record));
         assertEquals(ConnectionEvent.ACTION_DISCONNECTED, decoded.action());
         assertEquals("device-42", decoded.clientid());
@@ -160,6 +194,21 @@ class KafkaClusterBusRoutesTest {
         assertEquals(ConnectionEvent.REASON_TCP_CLOSED, decoded.reason());
         assertNotNull(decoded.disconnectedAt());
         assertNull(decoded.connectedAt(), "disconnected 事件不带 connected_at");
+    }
+
+    @Test
+    @DisplayName("连接事件(disconnected/keepalive_timeout): reason 如实透传")
+    void connectionEventKeepaliveTimeout() throws InterruptedException {
+        KafkaClusterBus bus = bus(kafka("jmqtt-client-events", null));
+
+        bus.publishConnectionEvent(ConnectionEvent.disconnected(
+                "device-42", null, 5, "10.0.0.7:51166", "node-1",
+                ConnectionEvent.REASON_KEEPALIVE_TIMEOUT));
+
+        ProducerRecord<String, byte[]> record = take(bus);
+        ConnectionEvent decoded = ClusterRecords.connectionEvent(toConsumerRecord(record));
+        assertEquals(ConnectionEvent.REASON_KEEPALIVE_TIMEOUT, decoded.reason());
+        assertEquals(5, decoded.protoVersion());
     }
 
     @Test
@@ -189,30 +238,19 @@ class KafkaClusterBusRoutesTest {
     }
 
     @Test
-    @DisplayName("下行 JSON 契约: {topic, qos?, payload}; QoS 以消息为准, 缺省 1")
-    void downlinkJsonContract() {
-        // 消息带 qos: 以消息为准
-        ConsumerRecord<String, byte[]> withQos = new ConsumerRecord<>(
-                "backend-commands", 0, 0L, "unused-key",
-                "{\"topic\":\"cmd/device-42\",\"qos\":2,\"payload\":\"hi\"}".getBytes(StandardCharsets.UTF_8));
-        InternalMessage decoded = ClusterRecords.downlinkMessage(withQos);
-        assertEquals("cmd/device-42", decoded.topic());
-        assertEquals(2, decoded.qos(), "投递 QoS 以消息体的 qos 字段为准");
-        assertEquals("hi", new String(decoded.payload(), StandardCharsets.UTF_8));
+    @DisplayName("下行契约: JSON {topic, qos, payload(byte[]→base64)}, 零 header")
+    void downlinkRawContract() {
+        byte[] payload = {0x00, 0x22, (byte) 0xFF};
+        String body = "{\"topic\":\"cmd/device-42\",\"qos\":1,\"payload\":\""
+                + java.util.Base64.getEncoder().encodeToString(payload) + "\"}";
+        ConsumerRecord<String, byte[]> raw = new ConsumerRecord<>(
+                "backend-commands", 0, 0L, "partition-key-only", body.getBytes(StandardCharsets.UTF_8));
+
+        InternalMessage decoded = ClusterRecords.downlinkMessage(raw);
+        assertNotNull(decoded);
+        assertEquals("cmd/device-42", decoded.topic(), "主题取自 JSON");
+        assertEquals(1, decoded.qos());
+        assertArrayEquals(payload, decoded.payload(), "二进制 payload 无损");
         assertNull(decoded.clientId(), "下行消息无来源客户端, 不得排除任何订阅者");
-
-        // 消息不带 qos: 缺省 1(指令类要 PUBACK 确认)
-        ConsumerRecord<String, byte[]> minimal = new ConsumerRecord<>(
-                "backend-commands", 0, 0L, "unused-key",
-                "{\"topic\":\"cmd/device-42\",\"payload\":\"hello\"}".getBytes(StandardCharsets.UTF_8));
-        assertEquals(1, ClusterRecords.downlinkMessage(minimal).qos(), "缺省 1");
-
-        // 非法 JSON / 缺 topic → 丢弃
-        ConsumerRecord<String, byte[]> bad = new ConsumerRecord<>(
-                "backend-commands", 0, 0L, "k", "not-json".getBytes(StandardCharsets.UTF_8));
-        assertNull(ClusterRecords.downlinkMessage(bad));
-        ConsumerRecord<String, byte[]> noTopic = new ConsumerRecord<>(
-                "backend-commands", 0, 0L, "k", "{\"payload\":\"x\"}".getBytes(StandardCharsets.UTF_8));
-        assertNull(ClusterRecords.downlinkMessage(noTopic));
     }
 }

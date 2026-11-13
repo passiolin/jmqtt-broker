@@ -46,13 +46,32 @@ public final class MqttTopic {
     }
 
     /**
-     * 切分层级。使用 {@code limit=-1} 保留尾随空层, 保证 {@code a/} 解析为 {@code ["a", ""]}。
+     * 切分层级。保留尾随空层, 保证 {@code a/} 解析为 {@code ["a", ""]}。
+     *
+     * <p>手工切分而不是 {@code String.split}: 后者走正则引擎, 而本方法在每条消息的
+     * 发布/投递路径上都会调用 —— 压测火焰图里它是稳定的热点。
      */
     public static String[] levels(String topicOrFilter) {
         if (topicOrFilter == null || topicOrFilter.isEmpty()) {
             return new String[]{BLANK};
         }
-        return topicOrFilter.split("/", -1);
+        int count = 1;
+        for (int i = 0; i < topicOrFilter.length(); i++) {
+            if (topicOrFilter.charAt(i) == '/') {
+                count++;
+            }
+        }
+        String[] levels = new String[count];
+        int index = 0;
+        int start = 0;
+        for (int i = 0; i < topicOrFilter.length(); i++) {
+            if (topicOrFilter.charAt(i) == '/') {
+                levels[index++] = topicOrFilter.substring(start, i);
+                start = i + 1;
+            }
+        }
+        levels[index] = topicOrFilter.substring(start);
+        return levels;
     }
 
     /**
@@ -65,7 +84,14 @@ public final class MqttTopic {
         if (topic.indexOf('+') >= 0 || topic.indexOf('#') >= 0) {
             return false;
         }
-        return levels(topic).length <= MAX_TOPIC_LEVELS;
+        // 只数层数, 不分配数组 —— 发布路径上每条消息都会走到这里
+        int levels = 1;
+        for (int i = 0; i < topic.length(); i++) {
+            if (topic.charAt(i) == '/') {
+                levels++;
+            }
+        }
+        return levels <= MAX_TOPIC_LEVELS;
     }
 
     /**

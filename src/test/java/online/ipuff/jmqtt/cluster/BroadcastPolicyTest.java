@@ -105,23 +105,6 @@ class BroadcastPolicyTest {
         assertTrue(bus.isBroadcastAllowed("sensor/room1/temp"));
     }
 
-    @Test
-    @DisplayName("接管通道不受广播开关影响")
-    void takeoverIsNotGatedByBroadcast() {
-        KafkaClusterBus bus = newBus(kafka(false, List.of()));
-
-        assertFalse(bus.isBroadcastAllowed("app/123/cmd"), "消息面确实被关掉了");
-
-        // 但接管必须照常出站: 它承载的是「同一 clientId 的旧连接该释放了」,
-        // 属于会话正确性的一部分, 与「跨节点 pub/sub 要不要做」是两个问题。
-        // 一旦被这个开关误伤, 表现为同一 clientId 在两个节点同时在线,
-        // 而这在业务侧看是「指令被处理了两次」这种极难定位的现象。
-        bus.publishTakeover("client-1", "node-b");
-
-        assertEquals(1L, bus.stats().get("outboxSize"),
-                "接管记录必须进入出站队列, 不受 broadcast-enabled 影响");
-    }
-
     // ------------------------------------------------------------------
 
     private static KafkaClusterBus newBus(BrokerProperties.KafkaProperties kafka) {
@@ -136,8 +119,7 @@ class BroadcastPolicyTest {
                 511, true, true, 10485760, 32768, 65536);
         // 不调用 start(): 本组用例只验证策略判断, 不需要连接 Kafka。
         // internalSendServer / takeoverListener 在这条路径上不会被触达。
-        return new KafkaClusterBus(properties, null, (clientId, fromNodeId) -> {
-        }, new online.ipuff.jmqtt.subscribe.SubscribeStoreService());
+        return new KafkaClusterBus(properties, null, new online.ipuff.jmqtt.subscribe.SubscribeStoreService());
     }
 
     /** 与 ClusterBusTest 的同类辅助保持一致, 便于两个文件对照阅读 */

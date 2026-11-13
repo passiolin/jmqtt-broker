@@ -29,14 +29,14 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * 分区消费位点的完成跟踪 —— 多线程并行消费的安全边界。
  *
- * <p>Kafka 只保证分区内有序, 消费侧按分区分派 worker 后, 同一分区的记录
- * 仍然按序处理(FIFO 队列), 但「整批处理完再 commitSync」不再成立 ——
+ * <p>消费侧用共享队列 + worker 争抢后, 同一分区的记录可能乱序完成;
+ * 「整批处理完再 commitSync」同样不成立 ——
  * 位点提交必须只领先于<b>已连续完成</b>的部分:
  *
  * <ul>
  *   <li>{@link #submitted}: poller 把记录交给 worker 前登记, 建立位点的起点</li>
- *   <li>{@link #completed}: worker 处理完一条记录后上报(不同分区并发,
- *       同一分区串行有序)</li>
+ *   <li>{@link #completed}: worker 处理完一条记录后上报(任意顺序;
+ *       同一分区乱序完成由优先队列兜底)</li>
  *   <li>{@link #drainCommittable}: 取出「自上次提交以来连续完成」推进到的位点;
  *       高位 offset 先完成时<b>不得</b>推进 —— 否则中间未完成的消息在宕机重放时
  *       就静默丢失了, 至少一次语义被破坏</li>

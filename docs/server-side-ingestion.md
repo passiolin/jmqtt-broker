@@ -164,23 +164,17 @@ Kafka 只保证**分区内**有序，所以键的选择决定了下游能依赖�
 
 ### 记录格式（下游要知道的全部）
 
-value 是 JSON 信封（字段名与既有后台的消费格式对齐），设备身份不用解析 payload：
-
-```
-key      = 分区键(按 uplink-key 决定: topic 或设备标识)
-value    = JSON 信封
-headers  = jmqtt-kind = routed-publish
-```
+记录格式（JSON 结构，零 Kafka header；集群广播同一份）：
 
 ```json
 {"username":"app-user","topic":"v1/telemetry","timestamp":1789381061831,
- "qos":1,"payload":"{\"temp\":23.1}","node":"broker-1","clientid":"device-123"}
+ "qos":1,"payload":"<base64>","node":"broker-1","clientid":"device-123"}
 ```
 
-- **`payload` 是字符串化的消息体。** 二进制 payload 会被 UTF-8 有损解码（替换字符）——
-  需要无损传输二进制的场景应直接订阅 MQTT，而不是走数据面
-- **`clientid` 就是设备标识**，下游做设备维度聚合、分组、去重时直接用它；
-  `username` 缺失时省略该字段，`node` 是接入节点标识（brokerId）
+- `payload` 为 `byte[]`，JSON 中以 base64 承载，**二进制无损**
+- **设备标识在 `clientid` 字段**：下游做设备维度聚合、分组、去重时直接用它；
+  分区键只是顺序边界(`uplink-key: device` 时 key 即 clientId)
+- 广播消费只需要 topic/qos/payload/node(去自回环)，其余字段供后台使用
 - 同 key（`uplink-key: device` 时即同设备）落同一分区, 分区内有序(producer 重试可能乱序, 尽力有序)
 
 > 多路由上行（`routes`：每条路由一组过滤器 + 目标 topic + 分区键，一条消息命中多条就各发一份）
