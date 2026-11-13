@@ -68,7 +68,17 @@ public final class ClusterRecords {
 
     /** 编码集群广播记录: key = MQTT 主题(同主题同分区保序), value = JSON。 */
     public static ProducerRecord<String, byte[]> toRecord(String kafkaTopic, InternalMessage message) {
-        long timestamp = System.currentTimeMillis();
+        return toRecord(kafkaTopic, System.currentTimeMillis(), message);
+    }
+
+    /**
+     * 编码集群广播记录, 时间戳由调用方给定。
+     *
+     * <p>异步编码时 timestamp 必须在<b>提交时</b>取: 编码排队几毫秒后再取会把
+     * 后台看到的「消息时间」整体后移, 链路分段计时就失真了。
+     */
+    public static ProducerRecord<String, byte[]> toRecord(
+            String kafkaTopic, long timestamp, InternalMessage message) {
         return new ProducerRecord<>(kafkaTopic, null, timestamp,
                 message.topic(), brokerJson(message, timestamp));
     }
@@ -80,7 +90,12 @@ public final class ClusterRecords {
      */
     public static ProducerRecord<String, byte[]> toRoutedRecord(
             String kafkaTopic, String partitionKey, InternalMessage message) {
-        long timestamp = System.currentTimeMillis();
+        return toRoutedRecord(kafkaTopic, partitionKey, System.currentTimeMillis(), message);
+    }
+
+    /** 编码数据面上行记录, 时间戳由调用方给定(理由同 {@link #toRecord(String, long, InternalMessage)})。 */
+    public static ProducerRecord<String, byte[]> toRoutedRecord(
+            String kafkaTopic, String partitionKey, long timestamp, InternalMessage message) {
         return new ProducerRecord<>(kafkaTopic, null, timestamp,
                 partitionKey, brokerJson(message, timestamp));
     }

@@ -36,6 +36,7 @@ import online.ipuff.jmqtt.session.BackpressureMetrics;
 import online.ipuff.jmqtt.session.ConnectionRegistry;
 import online.ipuff.jmqtt.session.ISessionStoreService;
 import online.ipuff.jmqtt.session.SendBuffer;
+import online.ipuff.jmqtt.session.SessionIoExecutor;
 import online.ipuff.jmqtt.session.SessionStore;
 import online.ipuff.jmqtt.session.persistence.PersistedSession;
 import online.ipuff.jmqtt.session.persistence.SessionPersistence;
@@ -46,6 +47,7 @@ import online.ipuff.jmqtt.store.InflightPersistence;
 import online.ipuff.jmqtt.subscribe.ISubscribeStoreService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -102,6 +104,8 @@ public class ConnectHandler {
     private final IInboundQos2Store inboundQos2Store;
     private final NodeMetricsService nodeMetricsService;
     private final online.ipuff.jmqtt.session.SessionLifecycle sessionLifecycle;
+    /** Redis 会话 I/O 执行器; 为 null 表示同步路径(测试/未启用 Redis) */
+    private final SessionIoExecutor sessionIo;
 
     public ConnectHandler(BrokerProperties properties,
                           IAuthService authService,
@@ -119,6 +123,31 @@ public class ConnectHandler {
                           IInboundQos2Store inboundQos2Store,
                           NodeMetricsService nodeMetricsService,
                           online.ipuff.jmqtt.session.SessionLifecycle sessionLifecycle) {
+        this(properties, authService, sessionStoreService, subscribeStoreService,
+                dupPublishMessageStoreService, dupPubRelMessageStoreService, connectionRegistry,
+                sessionPersistence, clusterBus, internalSendServer, backpressureMetrics,
+                inflightPersistence, adminStatePublisher, inboundQos2Store, nodeMetricsService,
+                sessionLifecycle, null);
+    }
+
+    @Autowired
+    public ConnectHandler(BrokerProperties properties,
+                          IAuthService authService,
+                          ISessionStoreService sessionStoreService,
+                          ISubscribeStoreService subscribeStoreService,
+                          IDupPublishMessageStoreService dupPublishMessageStoreService,
+                          IDupPubRelMessageStoreService dupPubRelMessageStoreService,
+                          ConnectionRegistry connectionRegistry,
+                          SessionPersistence sessionPersistence,
+                          ClusterBus clusterBus,
+                          InternalSendServer internalSendServer,
+                          BackpressureMetrics backpressureMetrics,
+                          InflightPersistence inflightPersistence,
+                          AdminStatePublisher adminStatePublisher,
+                          IInboundQos2Store inboundQos2Store,
+                          NodeMetricsService nodeMetricsService,
+                          online.ipuff.jmqtt.session.SessionLifecycle sessionLifecycle,
+                          SessionIoExecutor sessionIo) {
         this.properties = properties;
         this.authService = authService;
         this.sessionStoreService = sessionStoreService;
@@ -135,6 +164,7 @@ public class ConnectHandler {
         this.inboundQos2Store = inboundQos2Store;
         this.nodeMetricsService = nodeMetricsService;
         this.sessionLifecycle = sessionLifecycle;
+        this.sessionIo = sessionIo;
     }
 
     public void processConnect(Channel channel, MqttConnectMessage msg) {
@@ -247,8 +277,23 @@ public class ConnectHandler {
      * 认证通过后的 CONNECT 后半段: 会话处理、落库、注册、CONNACK、恢复投递。
      * 参数里的遗嘱与心跳是挂起前从 CONNECT 报文里取出的快照。
      */
+    /**
+     * 认证通过后的 CONNECT 后半段。
+     *
+     * <p>持久会话走异步会话 I/O(Redis 不占 event loop); 其余情况保持原有同步路径 ——
+     * 未启用 Redis 的部署没有阻塞来源, 不值得为此多一次线程切换。
+     */
     private void finishConnect(Channel channel, ConnectOptions options, String clientId,
                                WillMessage willMessage, int requestedKeepAlive) {
+        if (properties.redis().enabled() && sessionIo != null && !options.cleanSession()) {
+            finishConnectAsync(channel, options, clientId, willMessage, requestedKeepAlive);
+            return;
+        }
+        finishConnectSync(channel, options, clientId, willMessage, requestedKeepAlive);
+    }
+
+    private void finishConnectSync(Channel channel, ConnectOptions options, String clientId,
+                                   WillMessage willMessage, int requestedKeepAlive) {
         // 3) 会话处理 —— 决定 sessionPresent
         SessionStore existing = sessionStoreService.get(clientId);
         boolean sessionPresent = false;
@@ -368,6 +413,149 @@ public class ConnectHandler {
             //     放在重发未确认消息之后: 先补齐已发出的, 再补未发出的, 顺序更贴近真实时序。
             internalSendServer.deliverPendingMessages(clientId, channel);
         }
+    }
+
+    /**
+     * 持久会话的异步接入: restore + 取归属 + 载入在途镜像在会话 I/O 线程完成,
+     * event loop 只做状态机决策与 Netty 写。
+     *
+     * <p>挂起期间 {@link ChannelAttributes#AUTH_PENDING} 保持 true, 入口会忽略后续报文;
+     * 保存会话完成后再回 event loop 发 CONNACK —— 与同步路径「先落库再确认」的
+     * 持久性语义一致。
+     */
+    private void finishConnectAsync(Channel channel, ConnectOptions options, String clientId,
+                                    WillMessage willMessage, int requestedKeepAlive) {
+        SessionStore existing = sessionStoreService.get(clientId);
+        long expireSeconds = options.sessionExpirySeconds();
+        channel.attr(ChannelAttributes.AUTH_PENDING).set(Boolean.TRUE);
+
+        sessionIo.submit(clientId, () -> {
+            // 本进程没有时才读持久层; 有本地会话就不必多一次 Redis 往返
+            PersistedSession persisted = existing == null ? sessionPersistence.restore(clientId) : null;
+            // 归属必须在写会话之前取: acquireOwner 会读出旧 owner
+            String previousOwner = sessionPersistence.acquireOwnership(
+                    clientId, properties.id(), expireSeconds);
+            List<DupPublishMessageStore> inflight = (existing != null || persisted != null)
+                    ? inflightPersistence.load(clientId) : List.of();
+            return new PreparedSession(persisted, previousOwner, inflight);
+        }).whenComplete((prepared, error) -> {
+            if (error != null) {
+                log.warn("会话持久层准备失败, 按新会话继续: clientId={}", clientId, error);
+            }
+            PreparedSession state = error == null ? prepared : PreparedSession.EMPTY;
+            channel.eventLoop().execute(() -> {
+                if (!channel.isActive()) {
+                    channel.attr(ChannelAttributes.AUTH_PENDING).set(null);
+                    return;
+                }
+                continueAsyncConnect(channel, options, clientId, willMessage, requestedKeepAlive,
+                        existing, state);
+            });
+        });
+    }
+
+    /** 异步接入的 event-loop 段: 建会话/恢复订阅/注册, 然后把落库交给会话 I/O 线程。 */
+    private void continueAsyncConnect(Channel channel, ConnectOptions options, String clientId,
+                                      WillMessage willMessage, int requestedKeepAlive,
+                                      SessionStore existing, PreparedSession prepared) {
+        boolean sessionPresent = false;
+        if (prepared.persisted() != null) {
+            PersistedSession persisted = prepared.persisted();
+            existing = new SessionStore(properties.id(), clientId, false,
+                    persisted.expireSeconds() > 0 ? persisted.expireSeconds() : properties.sessionExpirySeconds(),
+                    null, persisted.createdAt());
+            restoreSubscriptions(persisted);
+            sessionPresent = true;
+        } else if (existing != null) {
+            sessionPresent = true;
+        } else {
+            clearDanglingState(clientId);
+        }
+
+        SessionStore session = existing != null
+                ? existing
+                : new SessionStore(properties.id(), clientId, false, options.sessionExpirySeconds());
+        session.setExpireSeconds(options.sessionExpirySeconds());
+        session.setWillMessage(willMessage);
+        session.markOpen();
+        sessionStoreService.put(session);
+
+        if (prepared.previousOwner() != null && !prepared.previousOwner().equals(properties.id())) {
+            announceTakeover(clientId, prepared.previousOwner());
+        }
+
+        int keepAlive = requestedKeepAlive;
+        configureKeepAlive(channel, keepAlive);
+        channel.attr(ChannelAttributes.CLIENT_ID).set(clientId);
+        channel.attr(ChannelAttributes.CONNECTED_AT).set(System.currentTimeMillis());
+        channel.attr(ChannelAttributes.KEEP_ALIVE).set(keepAlive);
+        int window = Math.max(1, properties.maxInflight());
+        channel.attr(ChannelAttributes.SEND_BUFFER).set(new SendBuffer(
+                window, properties.maxMqueueLen(), backpressureMetrics));
+        Channel previous = connectionRegistry.register(clientId, channel);
+        if (previous != null && previous != channel) {
+            log.info("clientId={} 发生连接接管, 关闭旧连接 {}", clientId, previous.id().asShortText());
+            nodeMetricsService.takeoverLocal();
+            previous.close();
+        }
+
+        if (sessionStoreService.get(clientId) != session) {
+            log.warn("clientId={} 的会话在注册间隙被接管清理, 断开本次连接让客户端重连", clientId);
+            connectionRegistry.unregister(clientId, channel);
+            channel.attr(ChannelAttributes.AUTH_PENDING).set(null);
+            channel.close();
+            return;
+        }
+
+        final boolean present = sessionPresent;
+        sessionIo.execute(clientId, () -> sessionPersistence.saveSession(session))
+                .whenComplete((ignored, error) -> channel.eventLoop().execute(() -> {
+                    if (error != null) {
+                        log.warn("写入持久会话失败, 继续接入: clientId={}", clientId, error);
+                    }
+                    channel.attr(ChannelAttributes.AUTH_PENDING).set(null);
+                    if (!channel.isActive()) {
+                        return;
+                    }
+                    completeAsyncConnect(channel, clientId, options, session, present,
+                            keepAlive, window, prepared.inflight());
+                }));
+    }
+
+    /** 异步接入的收尾: CONNACK、管理面/事件、在途重发与离线积压。 */
+    private void completeAsyncConnect(Channel channel, String clientId, ConnectOptions options,
+                                      SessionStore session, boolean sessionPresent,
+                                      int keepAlive, int window,
+                                      List<DupPublishMessageStore> inflight) {
+        channel.writeAndFlush(ReplyFactory.connAck(
+                MqttConnectReturnCode.CONNECTION_ACCEPTED, sessionPresent));
+        log.debug("CONNECT 成功 clientId={} cleanSession={} sessionPresent={} 会话保留={}s 窗口={}",
+                clientId, options.cleanSession(), sessionPresent,
+                session.getExpireSeconds(), window);
+
+        adminStatePublisher.clientOnline(clientId, channel);
+        nodeMetricsService.connectionOpened();
+        clusterBus.publishConnectionEvent(online.ipuff.jmqtt.cluster.ConnectionEvent.connected(
+                clientId,
+                channel.attr(ChannelAttributes.USERNAME).get(),
+                4,
+                ChannelAttributes.peernameOf(channel),
+                properties.id()));
+
+        if (sessionPresent) {
+            for (DupPublishMessageStore message : inflight) {
+                dupPublishMessageStoreService.put(message);
+            }
+            resendInflightMessages(channel, clientId);
+            internalSendServer.deliverPendingMessages(clientId, channel);
+        }
+    }
+
+    /** 会话 I/O 线程产出、event loop 消费的接入准备结果。 */
+    private record PreparedSession(PersistedSession persisted, String previousOwner,
+                                   List<DupPublishMessageStore> inflight) {
+
+        static final PreparedSession EMPTY = new PreparedSession(null, null, List.of());
     }
 
     /**

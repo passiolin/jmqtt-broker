@@ -59,6 +59,8 @@ public class SessionLifecycle {
     private final OfflineEnqueueBuffer offlineEnqueueBuffer;
     private final IMessageIdService messageIdService;
     private final SessionPersistence sessionPersistence;
+    /** Redis 会话 I/O 执行器; null = 同步路径(测试/未启用 Redis) */
+    private final SessionIoExecutor sessionIo;
 
     public SessionLifecycle(ISessionStoreService sessionStoreService,
                             ISubscribeStoreService subscribeStoreService,
@@ -69,6 +71,22 @@ public class SessionLifecycle {
                             OfflineEnqueueBuffer offlineEnqueueBuffer,
                             IMessageIdService messageIdService,
                             SessionPersistence sessionPersistence) {
+        this(sessionStoreService, subscribeStoreService, dupPublishMessageStoreService,
+                dupPubRelMessageStoreService, inboundQos2Store, pendingMessageStore,
+                offlineEnqueueBuffer, messageIdService, sessionPersistence, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public SessionLifecycle(ISessionStoreService sessionStoreService,
+                            ISubscribeStoreService subscribeStoreService,
+                            IDupPublishMessageStoreService dupPublishMessageStoreService,
+                            IDupPubRelMessageStoreService dupPubRelMessageStoreService,
+                            IInboundQos2Store inboundQos2Store,
+                            IPendingMessageStore pendingMessageStore,
+                            OfflineEnqueueBuffer offlineEnqueueBuffer,
+                            IMessageIdService messageIdService,
+                            SessionPersistence sessionPersistence,
+                            SessionIoExecutor sessionIo) {
         this.sessionStoreService = sessionStoreService;
         this.subscribeStoreService = subscribeStoreService;
         this.dupPublishMessageStoreService = dupPublishMessageStoreService;
@@ -78,6 +96,7 @@ public class SessionLifecycle {
         this.offlineEnqueueBuffer = offlineEnqueueBuffer;
         this.messageIdService = messageIdService;
         this.sessionPersistence = sessionPersistence;
+        this.sessionIo = sessionIo;
     }
 
     /**
@@ -93,7 +112,13 @@ public class SessionLifecycle {
         }
         if (session.isPersistent()) {
             session.markClosed();
-            sessionPersistence.saveSession(session);
+            // 落库放到会话 I/O 线程: 断开风暴时不能把 event loop 卡在 Redis 上。
+            // 同一 clientId 与 CONNECT 的 save 走同一分片, 顺序仍然是「先接入后断开」
+            if (sessionIo != null) {
+                sessionIo.execute(clientId, () -> sessionPersistence.saveSession(session));
+            } else {
+                sessionPersistence.saveSession(session);
+            }
             log.debug("连接关闭, 会话保留 {}s: clientId={}", session.getExpireSeconds(), clientId);
         } else {
             log.debug("连接关闭, 非持久会话即刻销毁: clientId={}", clientId);

@@ -35,6 +35,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -42,8 +43,8 @@ import java.util.concurrent.TimeUnit;
  *
  * <ul>
  *   <li><b>poll 线程只做 poll / 分派 / 提交</b>, 记录处理全在 worker 上</li>
- *   <li><b>共享队列 + worker 争抢</b>: 并行度只由 worker 数决定, 与 topic 分区数无关;
- *       同分区内不再保证顺序(业务明确不需要); 队列满时背压 poller</li>
+ *   <li><b>交接队列 + worker 争抢</b>: 在途许可与队列容量都等于 worker 数,
+ *       并行度只由 worker 数决定, 与 topic 分区数无关; 同分区内不再保证顺序</li>
  *   <li><b>位点只提交「已连续完成」的部分</b>: 至少一次, 宕机重放最多重复、绝不跳过</li>
  *   <li><b>消费线程不许死</b>: 异常退避后重建 consumer 继续, 不静默停摆</li>
  * </ul>
@@ -54,9 +55,6 @@ abstract class PartitionedConsumer {
 
     private static final Logger log = LoggerFactory.getLogger(PartitionedConsumer.class);
 
-    /** 单个消费 worker 的待处理队列容量: 队列满时 poller 阻塞(背压), 而不是丢弃 */
-    protected static final int WORKER_QUEUE_CAPACITY = 1000;
-
     /** 消费循环异常后重建 consumer 的退避时长 */
     protected static final long RESTART_BACKOFF_MS = 5_000;
 
@@ -66,18 +64,24 @@ abstract class PartitionedConsumer {
 
     private volatile KafkaConsumer<String, byte[]> consumer;
     private volatile Thread pollerThread;
-    /** 消费 worker 池: 所有 worker 从同一条共享队列争抢任务, 并行度与分区数解耦 */
+    /** 消费 worker 池: 所有 worker 从同一条共享交接队列争抢记录, 并行度与分区数解耦 */
     private volatile Worker[] workers;
-    /** 共享任务队列: poller 入队, 任意 worker 出队处理。容量按 worker 数放大以保背压缓冲 */
-    private final BlockingQueue<Runnable> workQueue;
+    /**
+     * 在途记录许可, 大小 = worker 数: 手头待处理后端记录永远不超过 worker 数,
+     * 这就是唯一的背压口径。permit 在 worker 处理完后才归还。
+     */
+    private final Semaphore inFlight;
+    /** 有界交接队列, 容量同样 = worker 数; 许可数保证它不会被塞满 */
+    private final BlockingQueue<WorkItem> handoff;
     /** 分区完成位点跟踪: 并行消费下「至少一次」的提交依据 */
     private volatile PartitionProgressTracker tracker;
 
 
     protected PartitionedConsumer(BrokerProperties properties) {
         this.properties = properties;
-        this.workQueue = new ArrayBlockingQueue<>(
-                WORKER_QUEUE_CAPACITY * Math.max(1, properties.kafka().consumerThreadsOrDefault()));
+        int workers = Math.max(1, workerPoolSize());
+        this.inFlight = new Semaphore(workers);
+        this.handoff = new ArrayBlockingQueue<>(workers);
     }
 
     protected abstract String threadName();
@@ -291,8 +295,8 @@ abstract class PartitionedConsumer {
     // ------------------------------------------------------------------
 
     /**
-     * 记录入共享队列, 由任意空闲 worker 争抢处理 —— 并行度与 topic 分区数解耦。
-     * 同分区内不保证顺序(业务明确不需要)。队列满时阻塞 poller(背压), 不丢弃。
+     * 记录进共享交接区, 由任意空闲 worker 争抢处理 —— 并行度与 topic 分区数解耦。
+     * 同分区内不保证顺序(业务明确不需要)。交接区满时 poller 阻塞(背压), 不丢弃。
      */
     private void dispatch(ConsumerRecords<String, byte[]> records) {
         if (workers == null || tracker == null) {
@@ -302,23 +306,22 @@ abstract class PartitionedConsumer {
         for (ConsumerRecord<String, byte[]> record : records) {
             TopicPartition tp = new TopicPartition(record.topic(), record.partition());
             long offset = record.offset();
-            progress.submitted(tp, offset);
+            WorkItem item = new WorkItem(record, progress, tp, offset);
             try {
-                workQueue.put(() -> {
-                    try {
-                        handle(record);
-                    } catch (Exception e) {
-                        // worker 不能因单条坏记录退出; 位点照常推进(跳过), 与串行时代的容错一致
-                        log.warn("消费记录处理异常, 跳过 topic={} partition={} offset={}",
-                                record.topic(), record.partition(), record.offset(), e);
-                    } finally {
-                        progress.completed(tp, offset);
+                // 背压: 在途许可 = worker 数, 全忙就等; 停止时最多 10ms 内退出.
+                // 未提交位点会在重启后重放
+                while (!inFlight.tryAcquire(10, TimeUnit.MILLISECONDS)) {
+                    if (!running) {
+                        return;
                     }
-                });
+                }
+                // 拿到许可后才登记: worker 在入队之后才能取到这条记录,
+                // 不会出现「先 completed 再 submitted」的倒序
+                progress.submitted(tp, offset);
+                handoff.put(item);
             } catch (InterruptedException e) {
-                // 停止中: 未处理也标记完成, 避免该分区位点永久卡住
                 Thread.currentThread().interrupt();
-                progress.completed(tp, offset);
+                inFlight.release();
                 return;
             }
         }
@@ -408,19 +411,29 @@ abstract class PartitionedConsumer {
 
         private void loop() {
             while (true) {
+                WorkItem item;
                 try {
-                    Runnable task = workQueue.poll(200, TimeUnit.MILLISECONDS);
-                    if (task == null) {
-                        // 已停止且队列排干 → 退出; 仍在运行则继续等下一批
-                        if (!running && workQueue.isEmpty()) {
-                            return;
-                        }
-                        continue;
-                    }
-                    task.run();
+                    item = handoff.poll(200, TimeUnit.MILLISECONDS);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     return;
+                }
+                if (item == null) {
+                    // 已停止且交接队列排干 → 退出; 仍在运行则继续等下一批
+                    if (!running && handoff.isEmpty()) {
+                        return;
+                    }
+                    continue;
+                }
+                try {
+                    handle(item.record());
+                } catch (Exception e) {
+                    // worker 不能因单条坏记录退出; 位点照常推进(跳过), 与串行时代的容错一致
+                    log.warn("消费记录处理异常, 跳过 topic={} partition={} offset={}",
+                            item.record().topic(), item.partition().partition(), item.offset(), e);
+                } finally {
+                    item.progress().completed(item.partition(), item.offset());
+                    inFlight.release();
                 }
             }
         }
@@ -432,5 +445,12 @@ abstract class PartitionedConsumer {
                 Thread.currentThread().interrupt();
             }
         }
+    }
+
+    /** 一条待处理记录 + 它所属的位点跟踪器(重启后 tracker 会被替换, 必须随记录捕获)。 */
+    private record WorkItem(ConsumerRecord<String, byte[]> record,
+                            PartitionProgressTracker progress,
+                            TopicPartition partition,
+                            long offset) {
     }
 }

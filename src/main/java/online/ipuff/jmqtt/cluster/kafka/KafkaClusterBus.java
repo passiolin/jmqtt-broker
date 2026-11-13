@@ -59,6 +59,7 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
 
     private final BrokerProperties properties;
     private final KafkaMessageProducer producer;
+    private final KafkaRecordSerializer serializer;
     private final KafkaClusterConsumer clusterConsumer;
     private final KafkaDownlinkConsumer downlinkConsumer;
     /** 跨节点接管触发侧; 仅 cluster-enabled 且配置了连接事件 topic 时存在 */
@@ -97,6 +98,7 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
                            ConnectionEventTakeover connectionEventTakeover) {
         this.properties = properties;
         this.producer = new KafkaMessageProducer(properties);
+        this.serializer = new KafkaRecordSerializer(producer);
         this.clusterConsumer = new KafkaClusterConsumer(properties, internalSendServer, subscribeStoreService);
         List<String> downlinkTopics = KafkaDownlinkConsumer.topicsOf(properties.kafka());
         this.downlinkConsumer = downlinkTopics.isEmpty()
@@ -118,6 +120,11 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
     /** 测试用: 出站队列(同包可见, 校验 record 结构)。 */
     BlockingQueue<ProducerRecord<String, byte[]>> outbox() {
         return producer.outbox;
+    }
+
+    /** 测试用: 等异步编码把记录都放进 outbox。 */
+    void flushSerialization() throws InterruptedException {
+        serializer.flush();
     }
 
     /** 解析多路由上行配置; 非法过滤器忽略并告警(与广播过滤器同一口径) */
@@ -227,7 +234,7 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
         // 消息面 key 恒为 MQTT 主题 —— 「同主题必落同分区, 分区内有序 ⇒ 同主题有序」
         // 这条链的起点。数据面的 uplink-key(按设备分区)只属于数据面, 不得泄漏进来:
         // 否则改一个数据面参数会悄悄破坏消息面的顺序保证。
-        producer.enqueue(ClusterRecords.toRecord(topic, message), message.topic());
+        serializer.publishBroadcast(topic, message);
     }
 
     @Override
@@ -290,8 +297,7 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
                 String key = matcher.route.keyByDevice()
                         && message.clientId() != null && !message.clientId().isBlank()
                         ? message.clientId() : message.topic();
-                producer.enqueue(ClusterRecords.toRoutedRecord(matcher.route.topic(), key, message),
-                        message.topic());
+                serializer.publishRouted(matcher.route.topic(), key, message);
                 sent++;
             }
             if (sent > 0) {
@@ -306,7 +312,7 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
         }
         // 数据面分区键按 uplink-key 配置: topic(默认)或 device(每设备自身时序有序 + 流量散开)
         String partitionKey = properties.kafka().uplinkPartitionKey(message.clientId(), message.topic());
-        producer.enqueue(ClusterRecords.toRoutedRecord(topic, partitionKey, message), message.topic());
+        serializer.publishRouted(topic, partitionKey, message);
     }
 
     @Override
@@ -316,8 +322,7 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
             return;
         }
         // key=clientId 由 connectionEventRecord 保证: 同一客户端的事件严格有序
-        producer.enqueue(ClusterRecords.connectionEventRecord(topic, event),
-                "connection-event:" + event.action() + ":" + event.clientid());
+        serializer.publishConnectionEvent(topic, event);
     }
 
     @Override
@@ -338,6 +343,7 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
         String brokerId = properties.id();
         try {
             producer.start();
+            serializer.start();
             clusterConsumer.start();
             if (downlinkConsumer != null) {
                 downlinkConsumer.start();
@@ -395,6 +401,7 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
         if (eventConsumer != null) {
             eventConsumer.stop();
         }
+        serializer.stop();
         producer.stop();
         log.info("Kafka 集群总线已停止.");
     }
@@ -418,6 +425,11 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
             } catch (Exception e) {
                 log.debug("停止连接事件消费者异常", e);
             }
+        }
+        try {
+            serializer.stop();
+        } catch (Exception e) {
+            log.debug("停止记录编码器异常", e);
         }
         try {
             producer.stop();
@@ -460,6 +472,8 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
         stats.put("takeoverSkippedNotLocal", takeoverHandler == null ? 0L : takeoverHandler.skippedNotLocal());
         stats.put("outboxSize", producer.outboxSize());
         stats.put("outboxCapacity", producer.outboxCapacity());
+        // 事件循环提交了但编码队列已满而丢弃的条数(producer 的 dropped 是出站队列满)
+        stats.put("serializeDropped", serializer.dropped());
         return stats;
     }
 

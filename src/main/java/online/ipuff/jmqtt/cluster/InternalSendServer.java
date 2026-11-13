@@ -71,6 +71,16 @@ public class InternalSendServer {
     private final online.ipuff.jmqtt.admin.TopicCaptureService captureService;
     private final BackpressureMetrics metrics;
     private final QosMetrics qosMetrics;
+    /** 会话 I/O 执行器; null = 同步路径(测试/未启用 Redis) */
+    private final online.ipuff.jmqtt.session.SessionIoExecutor sessionIo;
+
+    /**
+     * 正在异步领取离线积压的 clientId。
+     *
+     * <p>CONNACK 与 PUBACK 都可能触发领取; 两条链并发会打乱「存储积压在前、
+     * 本地缓冲尾部在后」的顺序, 所以同一客户端只允许一条领取链。
+     */
+    private final java.util.Set<String> pendingDraining = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     public InternalSendServer(SubscribeStoreService subscribeStoreService,
                              ConnectionRegistry connectionRegistry,
@@ -83,6 +93,24 @@ public class InternalSendServer {
                              BackpressureMetrics metrics,
                              QosMetrics qosMetrics,
                              online.ipuff.jmqtt.admin.TopicCaptureService captureService) {
+        this(subscribeStoreService, connectionRegistry, messageIdService, dupPublishMessageStoreService,
+                sessionStoreService, pendingMessageStore, offlineEnqueueBuffer, properties,
+                metrics, qosMetrics, captureService, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public InternalSendServer(SubscribeStoreService subscribeStoreService,
+                             ConnectionRegistry connectionRegistry,
+                             IMessageIdService messageIdService,
+                             IDupPublishMessageStoreService dupPublishMessageStoreService,
+                             ISessionStoreService sessionStoreService,
+                             IPendingMessageStore pendingMessageStore,
+                             OfflineEnqueueBuffer offlineEnqueueBuffer,
+                             BrokerProperties properties,
+                             BackpressureMetrics metrics,
+                             QosMetrics qosMetrics,
+                             online.ipuff.jmqtt.admin.TopicCaptureService captureService,
+                             online.ipuff.jmqtt.session.SessionIoExecutor sessionIo) {
         this.subscribeStoreService = subscribeStoreService;
         this.connectionRegistry = connectionRegistry;
         this.messageIdService = messageIdService;
@@ -94,6 +122,7 @@ public class InternalSendServer {
         this.captureService = captureService;
         this.metrics = metrics;
         this.qosMetrics = qosMetrics;
+        this.sessionIo = sessionIo;
     }
 
     /**
@@ -151,6 +180,14 @@ public class InternalSendServer {
      * @return 本次投递条数
      */
     public int deliverPendingMessages(String clientId, Channel channel) {
+        if (sessionIo != null && properties.redis().enabled()) {
+            // Redis 版离线队列: 领取动作放会话 I/O 线程, 投递仍回 event loop
+            if (!pendingDraining.add(clientId)) {
+                return 0;
+            }
+            drainPendingAsync(clientId, channel, offlineEnqueueBuffer.drainClient(clientId), new int[1]);
+            return 0;
+        }
         int delivered = 0;
         // 异步缓冲里滞留的消息比存储里的新: 先清存储积压, 再补投缓冲尾部, 保住时序
         List<PendingMessage> stillBuffered = offlineEnqueueBuffer.drainClient(clientId);
@@ -190,6 +227,82 @@ public class InternalSendServer {
             log.info("已投递离线消息: clientId={} 条数={}", clientId, delivered);
         }
         return delivered;
+    }
+
+    /**
+     * 异步领取离线积压: 每批从会话 I/O 线程取, 回到 event loop 投递。
+     *
+     * <p>与同步版本同一语义: 窗口满就停, 未取出的留在持久队列; 窗口可用后
+     * 由 {@code drainSendBuffer} 再次触发。
+     */
+    private void drainPendingAsync(String clientId, Channel channel,
+                                   List<PendingMessage> stillBuffered, int[] delivered) {
+        if (!channel.isActive()) {
+            requeueFront(clientId, stillBuffered, 0);
+            pendingDraining.remove(clientId);
+            return;
+        }
+        SendBuffer buffer = channel.attr(ChannelAttributes.SEND_BUFFER).get();
+        if (buffer != null && !buffer.hasWindow()) {
+            requeueFront(clientId, stillBuffered, 0);
+            pendingDraining.remove(clientId);
+            return;
+        }
+        sessionIo.submit(clientId, () -> pendingMessageStore.drainBatch(clientId, DRAIN_BATCH_SIZE))
+                .whenComplete((batch, error) -> channel.eventLoop().execute(() -> {
+                    if (error != null) {
+                        log.warn("领取离线积压失败: clientId={}", clientId, error);
+                        finishDrain(clientId, delivered[0] + deliverBuffered(clientId, channel, stillBuffered));
+                        return;
+                    }
+                    if (batch == null || batch.isEmpty()) {
+                        finishDrain(clientId, delivered[0] + deliverBuffered(clientId, channel, stillBuffered));
+                        return;
+                    }
+                    if (!channel.isActive()) {
+                        log.warn("连接已关闭, 丢弃已领取的离线消息 {} 条: clientId={}",
+                                batch.size(), clientId);
+                        finishDrain(clientId, delivered[0]);
+                        return;
+                    }
+                    for (PendingMessage message : batch) {
+                        // 队列里的消息是「正常投递」, retain 恒为 false
+                        deliver(channel, clientId, message.topic(), message.payload(),
+                                message.qos(), message.retain(), false);
+                        delivered[0]++;
+                    }
+                    drainPendingAsync(clientId, channel, stillBuffered, delivered);
+                }));
+    }
+
+    /** 存储队列清空后补投本地缓冲尾部; 窗口满时把剩余整段放回缓冲头部。 */
+    private int deliverBuffered(String clientId, Channel channel, List<PendingMessage> buffered) {
+        int delivered = 0;
+        for (int i = 0; i < buffered.size(); i++) {
+            SendBuffer buffer = channel.attr(ChannelAttributes.SEND_BUFFER).get();
+            if (!channel.isActive() || (buffer != null && !buffer.hasWindow())) {
+                requeueFront(clientId, buffered, i);
+                return delivered;
+            }
+            PendingMessage message = buffered.get(i);
+            deliver(channel, clientId, message.topic(), message.payload(),
+                    message.qos(), message.retain(), false);
+            delivered++;
+        }
+        return delivered;
+    }
+
+    private void requeueFront(String clientId, List<PendingMessage> buffered, int from) {
+        if (from < buffered.size()) {
+            offlineEnqueueBuffer.requeueFront(clientId, buffered.subList(from, buffered.size()));
+        }
+    }
+
+    private void finishDrain(String clientId, int delivered) {
+        pendingDraining.remove(clientId);
+        if (delivered > 0) {
+            log.info("已投递离线消息: clientId={} 条数={}", clientId, delivered);
+        }
     }
 
     /**
