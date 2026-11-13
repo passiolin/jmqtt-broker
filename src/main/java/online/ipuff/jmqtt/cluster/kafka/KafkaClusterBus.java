@@ -121,8 +121,8 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
      *
      * <p>三种形态要严格区分开, 因为它们对应完全不同的业务前提:
      * <ol>
-     *   <li><b>关闭广播</b> —— 业务上不存在跨节点 MQTT 订阅, 消息只在本节点投递 + 走上行数据面。</li>
-     *   <li><b>全部广播</b>(未配置过滤器) —— 默认行为, 保持既有语义不变。</li>
+     *   <li><b>关闭广播</b>(默认) —— 业务上不存在跨节点 MQTT 订阅, 消息只在本节点投递 + 走上行数据面。</li>
+     *   <li><b>全部广播</b>(开启且未配置过滤器) —— 保持既有语义不变。</li>
      *   <li><b>按过滤器广播</b> —— 只有可能被其他节点订阅的主题才跨节点, 例如端与端之间的信令。</li>
      * </ol>
      * 第 2、3 种都靠「过滤器列表是否为空」区分, 所以第 1 种必须由独立的开关表达 ——
@@ -131,9 +131,9 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
     private void initBroadcastMatcher() {
         BrokerProperties.KafkaProperties kafka = properties.kafka();
         if (!kafka.broadcastEnabled()) {
-            log.warn("集群广播已关闭(broadcast-enabled=false)。本节点投递与数据面上行不受影响, "
+            log.info("集群广播已关闭(broadcast-enabled=false, 默认值)。本节点投递与数据面上行不受影响, "
                     + "但其他节点上的 MQTT 订阅者收不到本节点发布的消息。"
-                    + "仅在确认业务上不存在跨节点 MQTT 订阅时使用 —— 这个开关一旦配错, "
+                    + "存在跨节点 MQTT 订阅时须置 true —— 这个开关一旦配错, "
                     + "表现是「消息静默不到」而不是报错, 因此控制台会把它标在节点概要里。");
             return;
         }

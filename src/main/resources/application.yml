@@ -140,12 +140,13 @@ jmqtt:
       auto-offset-reset: latest
 
       # ---- 消息面: 广播范围 ----
-      # 广播总开关。只有「其他节点上的 MQTT 订阅者也需要这条消息」时才需要广播。
+      # 广播总开关, 默认关闭。只有「其他节点上的 MQTT 订阅者也需要这条消息」时才需要广播。
       # 如果业务上只有设备与服务端通信(设备与其他端之间走 P2P 信令), 那么让每个节点
-      # 消费全量消息就纯粹是成本 —— 关掉后本节点投递与数据面上行都不受影响。
-      # ★ 配错的后果是「跨节点消息静默不到」而不是报错, 控制台会在节点概要里显示实际形态
-      broadcast-enabled: true
-      # 只有匹配这些过滤器的主题才进集群广播; 留空 = 全部主题都广播(默认)。
+      # 消费全量消息就纯粹是成本 —— 关闭后本节点投递与数据面上行都不受影响。
+      # 多节点且存在跨节点 MQTT 订阅时必须置 true, 否则跨节点投递静默失效;
+      # 控制台会在节点概要里显示实际形态(off / all / filtered)
+      broadcast-enabled: ${JMQTT_KAFKA_BROADCAST_ENABLED:false}
+      # 只有匹配这些过滤器的主题才进集群广播; 开启广播时留空 = 全部主题都广播。
       # 混合场景示例: 只保留端间交互与下行指令, 设备上报的海量遥测就不必让 N 个节点各读一遍
       #   broadcast-filters:
       #     - app/+/cmd
@@ -333,4 +334,6 @@ jmqtt:
 logging:
   level:
     root: INFO
-    online.ipuff.jmqtt: DEBUG
+    # 默认 INFO: DEBUG 会逐条报文打印(含 payload 预览), 压测/生产会显著抬高 CPU。
+    # 排障时临时开: --logging.level.online.ipuff.jmqtt=DEBUG
+    online.ipuff.jmqtt: ${JMQTT_LOG_LEVEL:INFO}
