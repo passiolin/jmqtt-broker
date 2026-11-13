@@ -205,6 +205,10 @@ jmqtt:
       # {"username":"app-user","reason":"tcp_closed","proto_ver":4,"proto_name":"MQTT",
       #  "peername":"10.0.0.9:51166","node":"broker-1","disconnected_at":1788982685781,
       #  "clientid":"app:PAD-x:abc123","action":"disconnected"}
+      #
+      # 集群模式下该 topic 兼作「跨节点接管」通道: 每个节点用独立 group 消费 connected
+      # 事件, 发现同一 clientId 已在别的节点上线时立即释放本节点旧连接(百毫秒级)。
+      # 留空则接管退化为 keepalive 超时(默认 60s × 1.5), 期间同一 clientId 双在线。
       connection-event-topic: ""
 
       # ---- 下行通道(后台 → broker) ----

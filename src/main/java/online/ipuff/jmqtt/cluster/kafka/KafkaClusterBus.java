@@ -21,10 +21,12 @@ import online.ipuff.jmqtt.cluster.InternalSendServer;
 import online.ipuff.jmqtt.config.BrokerProperties;
 import online.ipuff.jmqtt.router.MqttTopic;
 import online.ipuff.jmqtt.router.TopicTrie;
+import online.ipuff.jmqtt.session.ConnectionEventTakeover;
 import online.ipuff.jmqtt.subscribe.ISubscribeStoreService;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
@@ -38,11 +40,12 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * Kafka 总线的一级入口: 路由决策 + 组件装配 + 统计聚合。
  *
- * <p>内部三件套(职责分离, 各自独立启停):
+ * <p>内部组件(职责分离, 各自独立启停):
  * <ul>
  *   <li>{@link KafkaMessageProducer} —— 生产者: 有界出站队列 + 发送线程</li>
  *   <li>{@link KafkaClusterConsumer} —— 消费集群广播(jmqtt-cluster)</li>
  *   <li>{@link KafkaDownlinkConsumer} —— 消费后台下行(downlink topics)</li>
+ *   <li>{@link KafkaConnectionEventConsumer} —— 消费连接事件, 跨节点接管时释放旧连接</li>
  * </ul>
  *
  * <p>本类负责: 上行/广播的匹配与分流、记录编码(ClusterRecords)、生命周期、指标。
@@ -58,6 +61,9 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
     private final KafkaMessageProducer producer;
     private final KafkaClusterConsumer clusterConsumer;
     private final KafkaDownlinkConsumer downlinkConsumer;
+    /** 跨节点接管触发侧; 仅 cluster-enabled 且配置了连接事件 topic 时存在 */
+    private final ConnectionEventTakeover takeoverHandler;
+    private final KafkaConnectionEventConsumer eventConsumer;
 
     private volatile boolean running;
 
@@ -81,12 +87,29 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
     public KafkaClusterBus(BrokerProperties properties,
                            InternalSendServer internalSendServer,
                            ISubscribeStoreService subscribeStoreService) {
+        this(properties, internalSendServer, subscribeStoreService, null);
+    }
+
+    @Autowired
+    public KafkaClusterBus(BrokerProperties properties,
+                           InternalSendServer internalSendServer,
+                           ISubscribeStoreService subscribeStoreService,
+                           ConnectionEventTakeover connectionEventTakeover) {
         this.properties = properties;
         this.producer = new KafkaMessageProducer(properties);
         this.clusterConsumer = new KafkaClusterConsumer(properties, internalSendServer, subscribeStoreService);
         List<String> downlinkTopics = KafkaDownlinkConsumer.topicsOf(properties.kafka());
         this.downlinkConsumer = downlinkTopics.isEmpty()
                 ? null : new KafkaDownlinkConsumer(properties, internalSendServer, downlinkTopics);
+        this.takeoverHandler = connectionEventTakeover;
+        String eventTopic = properties.kafka().connectionEventTopic();
+        // 单节点不需要跨节点接管; 没有事件 topic 时也无从发现 - 两种情况都不装配,
+        // 旧连接继续由 keepalive 超时兜底(行为与改造前一致)
+        boolean eventTakeover = properties.clusterEnabled() && connectionEventTakeover != null
+                && eventTopic != null && !eventTopic.isBlank();
+        this.eventConsumer = eventTakeover
+                ? new KafkaConnectionEventConsumer(properties, connectionEventTakeover, eventTopic)
+                : null;
         initUplinkMatcher();
         initBroadcastMatcher();
         initRouteMatchers();
@@ -298,10 +321,8 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
     }
 
     @Override
-    public void publishTakeover(String clientId, String targetNodeId) {
-        // 统一 JSON 结构里没有控制指令的传输通道
-        log.warn("无法通知节点 [{}] 释放 clientId={}: 当前 Kafka 记录结构不承载跨节点接管指令",
-                targetNodeId, clientId);
+    public boolean takeoverSupported() {
+        return eventConsumer != null;
     }
 
     // ------------------------------------------------------------------
@@ -321,6 +342,9 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
             if (downlinkConsumer != null) {
                 downlinkConsumer.start();
             }
+            if (eventConsumer != null) {
+                eventConsumer.start();
+            }
         } catch (Exception e) {
             // 启动期 Kafka 不可用不应导致 broker 起不来, 但必须让运维明确知道
             log.error("Kafka 客户端初始化失败, 集群功能不可用。本地投递不受影响", e);
@@ -337,6 +361,15 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
             log.info("下行通道已启动: topics={} groupId={}(每节点独立, 只做本地投递) downlinkWorkers={}",
                     KafkaDownlinkConsumer.topicsOf(kafka), kafka.resolvedGroupId(brokerId) + "-downlink",
                     downlinkConsumer.workerCount());
+        }
+        if (eventConsumer != null) {
+            log.info("连接事件消费已启动: topic={} groupId={}(每节点独立, 单 worker), "
+                            + "跨节点接管由 connected 事件触发",
+                    kafka.connectionEventTopic(), kafka.resolvedGroupId(brokerId) + "-events");
+        } else if (properties.clusterEnabled()) {
+            log.warn("集群已启用但跨节点接管未生效: connection-event-topic 未配置。"
+                    + "客户端切换到其他节点后, 本节点旧连接会存活到自身心跳超时, "
+                    + "期间同一 clientId 双在线(指令可能重复执行)");
         }
         if ("jmqtt".equals(brokerId)) {
             // 默认 id 是集群里最隐蔽的坑: 所有节点同 id ⇒ 同消费组(广播退化为分摊),
@@ -359,6 +392,9 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
         if (downlinkConsumer != null) {
             downlinkConsumer.stop();
         }
+        if (eventConsumer != null) {
+            eventConsumer.stop();
+        }
         producer.stop();
         log.info("Kafka 集群总线已停止.");
     }
@@ -374,6 +410,13 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
                 downlinkConsumer.stop();
             } catch (Exception e) {
                 log.debug("停止下行消费者异常", e);
+            }
+        }
+        if (eventConsumer != null) {
+            try {
+                eventConsumer.stop();
+            } catch (Exception e) {
+                log.debug("停止连接事件消费者异常", e);
             }
         }
         try {
@@ -411,6 +454,10 @@ public class KafkaClusterBus implements ClusterBus, ClusterBusStats, SmartLifecy
         stats.put("broadcastSkipped", broadcastSkippedCount.get());
         stats.put("consumerThreads", (long) clusterConsumer.workerCount());
         stats.put("downlinkWorkers", downlinkConsumer == null ? 0L : (long) downlinkConsumer.workerCount());
+        // 跨节点接管: applied = 因事件释放的旧连接数; skippedStale = 迟到/不可比而放弃的事件数
+        stats.put("takeoverApplied", takeoverHandler == null ? 0L : takeoverHandler.applied());
+        stats.put("takeoverSkippedStale", takeoverHandler == null ? 0L : takeoverHandler.skippedStale());
+        stats.put("takeoverSkippedNotLocal", takeoverHandler == null ? 0L : takeoverHandler.skippedNotLocal());
         stats.put("outboxSize", producer.outboxSize());
         stats.put("outboxCapacity", producer.outboxCapacity());
         return stats;

@@ -387,25 +387,24 @@ public class ConnectHandler {
     }
 
     /**
-     * 通知旧节点释放该 clientId 的连接。
+     * 提示旧节点释放该 clientId 的连接。
      *
      * <p>MQTT 规范要求: 同一 clientId 已有连接时, 服务端必须断开既有连接
      * （[MQTT-3.1.4-2]）。
-     * 单节点内这件事由 {@code ConnectionRegistry.register} 顺手完成; 跨节点则必须显式通知 ——
-     * 否则旧节点上的连接会一直存活到它自己的心跳超时(可能几分钟)。
-     * 这期间同一个 clientId 在两个节点上同时在线, 表现为共享订阅重复投递、
-     * 下行指令被处理两次等难以复现的问题。
+     * 单节点内这件事由 {@code ConnectionRegistry.register} 顺手完成; 跨节点则靠
+     * <b>连接事件流</b>——本次 CONNECT 随后发布的 {@code connected} 事件会带上
+     * 本节点 id, 旧节点消费到后自行释放。这里只负责把「效果有没有」讲清楚。
      */
     private void announceTakeover(String clientId, String previousOwner) {
-        if (!clusterBus.enabled()) {
-            log.error("clientId={} 的会话归属在节点 [{}], 但集群总线未启用, 无法通知其释放旧连接。"
-                            + "旧连接会存活到自身心跳超时, 期间该客户端实际处于双连状态。"
-                            + "请同时开启 cluster-enabled 与 jmqtt.broker.kafka.enabled。",
+        if (clusterBus.takeoverSupported()) {
+            log.info("clientId={} 的会话归属在节点 [{}], 已通过连接事件触发其释放旧连接(跨节点接管)",
                     clientId, previousOwner);
             return;
         }
-        clusterBus.publishTakeover(clientId, previousOwner);
-        log.info("已通知节点 [{}] 释放 clientId={} 的旧连接(跨节点接管)", previousOwner, clientId);
+        log.warn("clientId={} 的会话归属在节点 [{}], 但跨节点接管未启用"
+                        + "(需 cluster-enabled=true 且配置 kafka.connection-event-topic)。"
+                        + "旧连接会存活到自身心跳超时, 期间该客户端实际处于双连状态。",
+                clientId, previousOwner);
     }
 
     /**

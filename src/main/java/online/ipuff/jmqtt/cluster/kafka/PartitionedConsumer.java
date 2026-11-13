@@ -95,13 +95,29 @@ abstract class PartitionedConsumer {
     /** 单条记录的处理(在分区对应的 worker 线程上执行)。 */
     protected abstract void handle(ConsumerRecord<String, byte[]> record);
 
+    /**
+     * 消费 worker 数。默认 2 × 核数; 连接事件这类低频、可延迟的流可以覆盖为 1,
+     * 避免为一个每秒几条的 topic 拉起一整个线程池。
+     */
+    protected int workerPoolSize() {
+        return properties.kafka().consumerThreadsOrDefault();
+    }
+
+    /**
+     * 无已提交位点时的起点。默认跟随 {@code kafka.auto-offset-reset}。
+     * 连接事件消费强制 latest: 回放历史事件没有意义且会误触发生过期的接管判断。
+     */
+    protected String autoOffsetReset() {
+        return properties.kafka().autoOffsetReset();
+    }
+
     final void start() {
         this.consumer = new KafkaConsumer<>(config());
         subscribe(this.consumer);
         this.tracker = new PartitionProgressTracker();
         this.running = true;
 
-        int count = properties.kafka().consumerThreadsOrDefault();
+        int count = Math.max(1, workerPoolSize());
         this.workers = new Worker[count];
         for (int i = 0; i < count; i++) {
             this.workers[i] = new Worker(workerNamePrefix() + i);
@@ -367,7 +383,7 @@ abstract class PartitionedConsumer {
                 KafkaMessageProducer.prefix(kafka) + "-" + brokerId + clientIdSuffix());
         // 手动提交, 保证处理后才推进 offset
         cfg.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
-        cfg.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, kafka.autoOffsetReset());
+        cfg.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, autoOffsetReset());
         cfg.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 500);
         cfg.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, 15_000);
         return cfg;

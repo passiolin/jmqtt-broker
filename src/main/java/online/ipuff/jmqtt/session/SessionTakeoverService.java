@@ -14,6 +14,7 @@
 package online.ipuff.jmqtt.session;
 
 import io.netty.channel.Channel;
+import online.ipuff.jmqtt.admin.AdminStatePublisher;
 import online.ipuff.jmqtt.cluster.TakeoverListener;
 import online.ipuff.jmqtt.store.IInboundQos2Store;
 import online.ipuff.jmqtt.store.IDupPubRelMessageStoreService;
@@ -22,6 +23,7 @@ import online.ipuff.jmqtt.store.IDupPublishMessageStoreService;
 import online.ipuff.jmqtt.subscribe.ISubscribeStoreService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
 /**
@@ -59,6 +61,7 @@ public class SessionTakeoverService implements TakeoverListener {
     private final IPendingMessageStore pendingMessageStore;
     private final online.ipuff.jmqtt.store.OfflineEnqueueBuffer offlineEnqueueBuffer;
     private final online.ipuff.jmqtt.metrics.NodeMetricsService nodeMetricsService;
+    private final AdminStatePublisher adminStatePublisher;
 
     public SessionTakeoverService(ConnectionRegistry connectionRegistry,
                                   ISessionStoreService sessionStoreService,
@@ -68,7 +71,8 @@ public class SessionTakeoverService implements TakeoverListener {
                                   IDupPubRelMessageStoreService dupPubRelMessageStoreService,
                                   IPendingMessageStore pendingMessageStore,
                                   online.ipuff.jmqtt.store.OfflineEnqueueBuffer offlineEnqueueBuffer,
-                                  online.ipuff.jmqtt.metrics.NodeMetricsService nodeMetricsService) {
+                                  online.ipuff.jmqtt.metrics.NodeMetricsService nodeMetricsService,
+                                  @Lazy AdminStatePublisher adminStatePublisher) {
         this.connectionRegistry = connectionRegistry;
         this.sessionStoreService = sessionStoreService;
         this.subscribeStoreService = subscribeStoreService;
@@ -78,6 +82,7 @@ public class SessionTakeoverService implements TakeoverListener {
         this.pendingMessageStore = pendingMessageStore;
         this.offlineEnqueueBuffer = offlineEnqueueBuffer;
         this.nodeMetricsService = nodeMetricsService;
+        this.adminStatePublisher = adminStatePublisher;
     }
 
     @Override
@@ -106,6 +111,9 @@ public class SessionTakeoverService implements TakeoverListener {
             log.info("收到跨节点接管通知: clientId={} 会话已迁至节点 [{}], "
                     + "本节点无活跃连接, 清理残留的会话与订阅副本", clientId, fromNodeId);
             cleanLocalRuntimeState(clientId, null);
+            // 旧节点管理面里的条目也要撤掉 —— channelInactive 因为「先注销再关闭」
+            // 不会走到 clientOffline, 不补这一下控制台上会一直挂着幽灵客户端
+            adminStatePublisher.clientOffline(clientId);
             // 持久离线队列已随会话归属新节点, 本地不动
             return;
         }
@@ -146,6 +154,8 @@ public class SessionTakeoverService implements TakeoverListener {
 
         log.info("接管清理完成: clientId={} 释放本节点在途 {} 条(持久镜像保留)",
                 clientId, inflight);
+        // 连接已在第 2 步注销, channelInactive 不会再发 clientOffline —— 这里补上
+        adminStatePublisher.clientOffline(clientId);
     }
 
     /**

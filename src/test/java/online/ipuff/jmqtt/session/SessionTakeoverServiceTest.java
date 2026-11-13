@@ -62,6 +62,7 @@ class SessionTakeoverServiceTest {
     private DupPubRelMessageStoreService dupPubRelStore;
     private InMemoryPendingMessageStore pendingStore;
     private InboundQos2Store inboundQos2Store;
+    private online.ipuff.jmqtt.admin.AdminStatePublisher adminStatePublisher;
     private SessionTakeoverService service;
 
     @BeforeEach
@@ -73,11 +74,12 @@ class SessionTakeoverServiceTest {
         dupPubRelStore = new DupPubRelMessageStoreService();
         pendingStore = new InMemoryPendingMessageStore();
         inboundQos2Store = new InboundQos2Store(TestBrokerProperties.create());
+        adminStatePublisher = mock(online.ipuff.jmqtt.admin.AdminStatePublisher.class);
         service = new SessionTakeoverService(connectionRegistry, sessionStoreService,
                 subscribeStoreService, inboundQos2Store, dupPublishStore, dupPubRelStore,
                 pendingStore,
                 new online.ipuff.jmqtt.store.OfflineEnqueueBuffer(pendingStore, 1000, 10000, true),
-                online.ipuff.jmqtt.TestNodeMetrics.create());
+                online.ipuff.jmqtt.TestNodeMetrics.create(), adminStatePublisher);
 
         sessionStoreService.put(new SessionStore("node-old", CLIENT, false, 7200));
         subscribeStoreService.put(new SubscribeStore(CLIENT, "sensor/+/temp", 1));
@@ -103,6 +105,8 @@ class SessionTakeoverServiceTest {
         assertFalse(sessionStoreService.containsKey(CLIENT), "本地会话应被移除");
         assertFalse(connectionRegistry.isOnline(CLIENT), "连接应已注销");
         assertEquals(0, subscribeStoreService.subscriptionCount(), "本地订阅应被清除");
+        // channelInactive 因「先注销再关闭」不会发 clientOffline, 接管路径必须自己补
+        verify(adminStatePublisher).clientOffline(CLIENT);
     }
 
     @Test
@@ -201,7 +205,7 @@ class SessionTakeoverServiceTest {
                     subscribeStoreService, inboundQos2Store, dupPublishStore, dupPubRelStore,
                     store,
                     new online.ipuff.jmqtt.store.OfflineEnqueueBuffer(store, 1000, 10000, true),
-                    online.ipuff.jmqtt.TestNodeMetrics.create());
+                    online.ipuff.jmqtt.TestNodeMetrics.create(), adminStatePublisher);
         }
     }
 

@@ -131,7 +131,12 @@ public final class ClusterRecords {
     // 连接事件(JSON 体, 零 header)
     // ------------------------------------------------------------------
 
-    /** 编码连接事件: key = clientId(同客户端事件保序), value = JSON(自带 action)。 */
+    /**
+     * 编码连接事件: key = clientId(同客户端事件保序), value = JSON(自带 action)。
+     *
+     * <p>key 是消费端唯一的低成本索引: 跨节点接管消费者先按 key 查本地连接/会话,
+     * 无关的事件不必反序列化 value。
+     */
     public static ProducerRecord<String, byte[]> connectionEventRecord(
             String kafkaTopic, ConnectionEvent event) {
         return new ProducerRecord<>(kafkaTopic, event.clientid(), json(event, "连接事件序列化失败"));

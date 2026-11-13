@@ -223,6 +223,18 @@ headers  = 无
 
 启用示例：`connection-event-topic: jmqtt-client-events`（Kafka topic 需预先创建）。
 
+集群模式下该 topic 同时承担**跨节点接管**：每个节点用独立 group（`<groupId>-events`）
+消费 `connected` 事件，发现同一 clientid 已在别的节点上线时，立即释放本节点旧连接
+（清本地会话/订阅/在途副本，绝不碰持久层里归新节点的数据）。收敛是百毫秒级的；
+事件丢失或延迟时仍由 keepalive 超时兜底，所以这是**加速**而非强保证。迟到事件会用
+`connected_at` 与本地连接的接入时间比较，本地连接更新时直接忽略，避免打断刚重连上来的连接。
+
+> 未配置本 topic 的集群节点会在启动时打一条 WARN：接管退化为 keepalive 超时，
+> 期间同一 clientid 可能双在线（指令重复执行）。
+>
+> 该 topic 现在同时是**接管输入**：生产权限应只授予 broker。能往它写一条伪造的
+> `connected` 事件，就能让所有节点释放任意 clientid 的连接（Kafka ACL 的职责）。
+
 ### 下行通道（后台 → 设备）
 
 `downlink`（留空关闭）：broker 消费这些 topic 并按**本地订阅**投递为 MQTT 消息。

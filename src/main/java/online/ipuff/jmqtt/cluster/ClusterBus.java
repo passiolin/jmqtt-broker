@@ -116,18 +116,14 @@ public interface ClusterBus {
     // ------------------------------------------------------------------
 
     /**
-     * 通知目标节点释放某个 clientId 的旧连接。
+     * 本总线是否具备跨节点接管能力。
      *
-     * <p>MQTT 规范要求同一 clientId 只能有一个活动连接。单节点内这件事由
-     * {@code ConnectionRegistry.register} 顺手完成; 跨节点时必须显式通知,
-     * 否则旧节点上的连接会一直存活到它自己的心跳超时。
-     *
-     * <p>这是<b>定向</b>消息: 只通知真正持有该连接的那个节点, 不做广播。
-     *
-     * @param clientId     需要被释放的客户端
-     * @param targetNodeId 目标节点 id
+     * <p>接管不是一条专门的报文, 而是复用连接事件流: 新节点上线时发布
+     * {@code connected} 事件, 持有旧连接的其他节点消费到后自行释放。
+     * 因此只有「集群启用 + 配置了连接事件 topic」时才为 true;
+     * 否则旧连接会存活到 keepalive 超时(这是降级, 不是故障)。
      */
-    default void publishTakeover(String clientId, String targetNodeId) {
-        // 单机模式无需通知: 接管在 ConnectionRegistry 内部就完成了
+    default boolean takeoverSupported() {
+        return false;
     }
 }
