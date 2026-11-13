@@ -71,7 +71,29 @@ docker run -e SPRING_CONFIG_ADDITIONAL_LOCATION=file:/etc/jmqtt/overrides.yml \
 其余配置(含 HTTP 认证/ACL)仍可用 Spring Boot 原生松散绑定:
 `JMQTT_BROKER_HTTP_AUTH_URL` → `jmqtt.broker.http-auth.url`,规则是
 `JMQTT_BROKER_` + 大写下划线形式。JVM 参数通过 `JAVA_OPTS` 覆盖,
-默认 `-XX:MaxRAMPercentage=75.0 -XX:+ExitOnOutOfMemoryError`。
+默认：
+
+```
+-XX:+UseG1GC -XX:MaxGCPauseMillis=50
+-XX:MaxRAMPercentage=75.0 -XX:+ExitOnOutOfMemoryError
+```
+
+**为什么默认用 G1 + 50ms：**
+
+- 堆按容器 75% 给（16G 容器约 12G），承载 20 万级持久会话。G1 是分区的、
+  面向停顿目标的收集器，正常负载下不会出现 Full GC；显式指定也避免基础镜像
+  或 JDK 默认收集器变化时静默改变延迟特性。
+- `MaxGCPauseMillis` 直接决定 broker 的尾延迟。20 万连接 / 3.3k msg/s 实测：
+  - `200ms`：Young 区涨到 4–6.6G，单次停顿 **137–185ms**，
+    回显下行时延（backend 回显→设备收到）P95 **1.05s**，
+    端到端时延（设备发送→收到回显）P95 **1.24s**；
+  - `50ms`：Young 区约 1.5G，单次停顿 **45–98ms**，
+    回显下行时延 P95 **28ms**，端到端时延 P95 **83ms**，
+    broker CPU 不变（31% 均值），内存峰值从 55% 降到 26%。
+  - 再降到 `20ms` 没有进一步收益：G1 不再缩小 Young 区，停顿地板约 45–95ms，
+    说明剩余停顿来自会话/订阅/主题树等存活对象的扫描，不是 young 区大小。
+- 因此 `50ms` 是「尾延迟已达标、CPU/内存不付额外代价」的默认值；高吞吐且
+  不敏感的场景可以调到 200ms，低延迟场景不建议低于 50ms。
 
 ```bash
 docker run -e JMQTT_KAFKA_ENABLED=true -e JMQTT_KAFKA_BOOTSTRAP_SERVERS=10.0.0.5:9092 \

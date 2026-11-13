@@ -20,7 +20,9 @@ EXPOSE 1883 8083 8922
 
 # 容器内存感知: 堆最多占容器内存的 75%; OOM 时直接退出, 交给重启策略拉起
 # (Spring Boot 2.7 + JDK 21 默认 MaxRAMPercentage=25%, 对 broker 偏保守)
-ENV JAVA_OPTS="-XX:MaxRAMPercentage=75.0 -XX:+ExitOnOutOfMemoryError"
+# G1 + 50ms 停顿目标: 12G 堆、20 万级会话下 Young GC 停顿从 137-185ms
+# 压到 45-98ms, 下行 P95 从 1.05s 降到 28ms(实测见 deploy/README.md)
+ENV JAVA_OPTS="-XX:+UseG1GC -XX:MaxGCPauseMillis=50 -XX:MaxRAMPercentage=75.0 -XX:+ExitOnOutOfMemoryError"
 
 # 故意不内置 HEALTHCHECK: 探针端口写死, 与运行时可改的 JMQTT_PORT/SERVER_PORT
 # 一旦漂移就会永久误报 unhealthy; 健康判定交给 LB 对 1883 的 TCP 检查与 Prometheus。

@@ -15,7 +15,7 @@ services:
     environment:
       TZ: Asia/Shanghai
       # 镜像内已带同样的默认值, 这里显式写出便于按需调整
-      JAVA_OPTS: "-XX:MaxRAMPercentage=75.0 -XX:+ExitOnOutOfMemoryError"
+      JAVA_OPTS: "-XX:+UseG1GC -XX:MaxGCPauseMillis=50 -XX:MaxRAMPercentage=75.0 -XX:+ExitOnOutOfMemoryError"
       # application.yml 已内置环境变量占位符(默认值即原配置), 常用项:
       #   SERVER_PORT / JMQTT_ID / JMQTT_PORT / JMQTT_WEBSOCKET_PORT
       #   JMQTT_AUTH_* / JMQTT_KAFKA_* / JMQTT_REDIS_*
