@@ -38,13 +38,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * 数据面与事件面的外部契约:
  * <ol>
- *   <li><b>多路由上行</b> —— 命中即发一份 raw 记录, 一条消息命中多条路由就发多份,
+ *   <li><b>多路由上行</b> —— 命中即发一份完整结构记录, 一条消息命中多条路由就发多份,
  *       每条路由有自己的分区键; 未命中不发 Kafka、集群广播不受影响</li>
- *   <li><b>上行 raw 契约</b> —— value = 原始 payload 字节(零编解码), 零 header,
- *       timestamp 用 Kafka 内建 record timestamp; 设备标识由分区键(key: device)承载,
- *       MQTT 主题不随记录携带(key: topic 路由时即 key)</li>
+ *   <li><b>上行契约</b> —— value = JSON 完整结构(payload 为 UTF-8 文本字段), 零 header,
+ *       timestamp 用 Kafka 内建 record timestamp; key 仅用于分区</li>
  *   <li><b>下行契约</b> —— JSON 结构: {"topic","qos","payload"}(payload 为
- *       byte[], JSON 中 base64 承载); key 仅用于分区</li>
+ *       UTF-8 文本字段); key 仅用于分区</li>
  *   <li><b>连接事件</b> —— connected/disconnected 字段集, key=clientId 有序</li>
  * </ol>
  */
@@ -133,7 +132,7 @@ class KafkaClusterBusRoutesTest {
     }
 
     @Test
-    @DisplayName("旧的单路由配置(uplink-topic)同样产出 raw 记录")
+    @DisplayName("旧的单路由配置(uplink-topic)同样产出完整结构记录")
     void legacySingleUplinkProducesRaw() throws InterruptedException {
         BrokerProperties.KafkaProperties kafka = new BrokerProperties.KafkaProperties(
                 true, "127.0.0.1:9092", "jmqtt", "jmqtt-cluster", null,
@@ -152,8 +151,8 @@ class KafkaClusterBusRoutesTest {
     }
 
     @Test
-    @DisplayName("上行 raw: 二进制 payload 逐位原样, 不经 UTF-8/JSON 编解码")
-    void binaryPayloadSurvivesUplinkRaw() throws InterruptedException {
+    @DisplayName("上行: 非 UTF-8 字节按 U+FFFD 替换(契约要求 payload 为 UTF-8 文本)")
+    void nonUtf8BytesAreReplacedOnUplink() throws InterruptedException {
         BrokerProperties.KafkaProperties kafka = new BrokerProperties.KafkaProperties(
                 true, "127.0.0.1:9092", "jmqtt", "jmqtt-cluster", null,
                 true, List.of(), "jmqtt-uplink", List.of("device/#"), false,
@@ -167,7 +166,9 @@ class KafkaClusterBusRoutesTest {
         ProducerRecord<String, byte[]> record = take(bus);
         InternalMessage decoded = ClusterRecords.fromRecord(toConsumerRecord(record));
         assertNotNull(decoded);
-        assertArrayEquals(payload, decoded.payload(), "引号/反斜杠/非法 UTF-8/NUL/换行 都不得被改动");
+        byte[] replaced = new String(payload, StandardCharsets.UTF_8).getBytes(StandardCharsets.UTF_8);
+        assertArrayEquals(replaced, decoded.payload(),
+                "0xFF 替换为 U+FFFD(EF BF BD); 引号/反斜杠/NUL/换行经 JSON 转义保留");
     }
 
     @Test
@@ -238,11 +239,9 @@ class KafkaClusterBusRoutesTest {
     }
 
     @Test
-    @DisplayName("下行契约: JSON {topic, qos, payload(byte[]→base64)}, 零 header")
+    @DisplayName("下行契约: JSON {topic, qos, payload(UTF-8 文本)}, 零 header")
     void downlinkRawContract() {
-        byte[] payload = {0x00, 0x22, (byte) 0xFF};
-        String body = "{\"topic\":\"cmd/device-42\",\"qos\":1,\"payload\":\""
-                + java.util.Base64.getEncoder().encodeToString(payload) + "\"}";
+        String body = "{\"topic\":\"cmd/device-42\",\"qos\":1,\"payload\":\"{\\\"cmd\\\":3011}\"}";
         ConsumerRecord<String, byte[]> raw = new ConsumerRecord<>(
                 "backend-commands", 0, 0L, "partition-key-only", body.getBytes(StandardCharsets.UTF_8));
 
@@ -250,7 +249,8 @@ class KafkaClusterBusRoutesTest {
         assertNotNull(decoded);
         assertEquals("cmd/device-42", decoded.topic(), "主题取自 JSON");
         assertEquals(1, decoded.qos());
-        assertArrayEquals(payload, decoded.payload(), "二进制 payload 无损");
+        assertArrayEquals("{\"cmd\":3011}".getBytes(StandardCharsets.UTF_8), decoded.payload(),
+                "payload 文本经 JSON 转义往返无损");
         assertNull(decoded.clientId(), "下行消息无来源客户端, 不得排除任何订阅者");
     }
 }

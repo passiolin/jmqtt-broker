@@ -20,9 +20,13 @@ import online.ipuff.jmqtt.cluster.InternalMessage;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.producer.ProducerRecord;
 
+import java.nio.charset.StandardCharsets;
+
 /**
- * Kafka 消息结构: <b>JSON, 零 Kafka header</b>。payload 为 {@code byte[]},
- * JSON 中以 base64 承载(Jackson 缺省行为), 二进制无损。
+ * Kafka 消息结构: <b>JSON, 零 Kafka header</b>。payload 为 UTF-8 文本
+ * ({@code new String(bytes, UTF_8)} 直接承载), 不再 base64;
+ * 契约要求 payload 为 UTF-8 文本, 非 UTF-8 字节编码时按 U+FFFD 替换。
+ * 旧 base64 形态的记录无法按新结构解读, 升级前须清空相关 topic。
  *
  * <h2>broker → Kafka(集群广播与数据面上行同一份)</h2>
  * <pre>
@@ -31,7 +35,7 @@ import org.apache.kafka.clients.producer.ProducerRecord;
  *   "topic":    string,
  *   "timestamp": long,
  *   "qos":       int,
- *   "payload":   byte[],
+ *   "payload":   string,
  *   "node":      string,   // jmqtt-broker-id
  *   "clientid":  string
  * }
@@ -42,7 +46,7 @@ import org.apache.kafka.clients.producer.ProducerRecord;
  *
  * <h2>后台 → broker(下行)</h2>
  * <pre>
- * { "topic": string, "qos": int, "payload": byte[] }
+ * { "topic": string, "qos": int, "payload": string }
  * </pre>
  */
 public final class ClusterRecords {
@@ -54,12 +58,12 @@ public final class ClusterRecords {
 
     /** broker 产出的完整消息结构。 */
     public record BrokerMessage(String username, String topic, long timestamp,
-                                int qos, byte[] payload, String node, String clientid) {
+                                int qos, String payload, String node, String clientid) {
     }
 
     /** 后台下行的最小消息结构。 */
     @JsonIgnoreProperties(ignoreUnknown = true)
-    public record DownlinkMessage(String topic, Integer qos, byte[] payload) {
+    public record DownlinkMessage(String topic, Integer qos, String payload) {
     }
 
     // ------------------------------------------------------------------
@@ -111,7 +115,7 @@ public final class ClusterRecords {
                 m.clientid(),
                 m.topic(),
                 m.qos(),
-                m.payload() == null ? new byte[0] : m.payload(),
+                m.payload() == null ? new byte[0] : m.payload().getBytes(StandardCharsets.UTF_8),
                 false,
                 false,
                 m.username());
@@ -136,7 +140,7 @@ public final class ClusterRecords {
                 null,
                 m.topic(),
                 m.qos() != null ? m.qos() : 1,
-                m.payload() == null ? new byte[0] : m.payload(),
+                m.payload() == null ? new byte[0] : m.payload().getBytes(StandardCharsets.UTF_8),
                 false,
                 false,
                 null);
@@ -176,7 +180,7 @@ public final class ClusterRecords {
                 message.topic(),
                 timestamp,
                 message.qos(),
-                message.payload(),
+                message.payload() == null ? "" : new String(message.payload(), StandardCharsets.UTF_8),
                 message.brokerId(),
                 message.clientId()), "Kafka 消息序列化失败");
     }

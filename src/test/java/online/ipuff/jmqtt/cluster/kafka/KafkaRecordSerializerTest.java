@@ -58,7 +58,7 @@ class KafkaRecordSerializerTest {
                 assertEquals("device-1", record.key());
                 ClusterRecords.BrokerMessage body =
                         JSON.readValue(record.value(), ClusterRecords.BrokerMessage.class);
-                order.add(Integer.parseInt(new String(body.payload(), StandardCharsets.UTF_8)));
+                order.add(Integer.parseInt(body.payload()));
             }
             assertEquals(200, order.size(), "所有消息都应被编码");
             for (int i = 0; i < order.size(); i++) {
