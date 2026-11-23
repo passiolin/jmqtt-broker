@@ -26,7 +26,6 @@ import org.springframework.boot.test.context.SpringBootTest;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * HTTP 认证/ACL 启用(但服务不可达)时的启动冒烟测试。
@@ -46,8 +45,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
                 "jmqtt.broker.http-auth.request-timeout-ms=200",
                 "jmqtt.broker.http-acl.enabled=true",
                 "jmqtt.broker.http-acl.url=http://127.0.0.1:1/acl",
-                "jmqtt.broker.http-acl.request-timeout-ms=200",
-                "jmqtt.broker.http-acl.cooldown-ms=60000"
+                "jmqtt.broker.http-acl.request-timeout-ms=200"
         })
 class BrokerStartupHttpAuthEnabledTest {
 
@@ -71,7 +69,8 @@ class BrokerStartupHttpAuthEnabledTest {
         // ACL 服务不可达: on-fail 默认 deny, future 收敛而不是异常
         assertFalse(aclService.check("c1", "u", "1.2.3.4", "publish", "t/1").join(),
                 "ACL 服务不可达时必须拒绝");
-        assertTrue(aclService.check("c1", "u", "1.2.3.4", "publish", "t/1").isDone(),
-                "故障决策必须已完成(冷却期内短路)");
+        // 无熔断: 故障逐次判定 —— 每次都真发请求, 各自收敛为拒绝
+        assertFalse(aclService.check("c1", "u", "1.2.3.4", "publish", "t/2").join(),
+                "故障逐次判定: 第二次同样收敛为拒绝");
     }
 }

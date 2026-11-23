@@ -80,7 +80,7 @@ SSL 终结交给前面的负载均衡层（NLB / ALB / HAProxy / Nginx 等）：
 - `allow` 放行；`deny` 拒绝（v5 0x86 / v3 code 4）；**`ignore` 落到认证链下一环** —— 内置静态鉴权（`auth-username`/`auth-password`），即链为 `[http, 内置]`
 - `superuser: true`：该连接**跳过后续全部 ACL 检查**
 - 超时/不可达/响应不合法：按 `on-error` 处理 —— `reject`（默认，fail-closed）或 `ignore`（回落内置）
-- 故障后进入 `cooldown-ms` 熔断冷却，期间不再发请求，防止认证中心故障拖垮连接建立
+- 故障逐次判定、无全局熔断（EMQX 同款）：每次超时/不可达都单独按 `on-error` 处理
 
 **ACL**（`jmqtt.broker.http-acl`，默认关）。每次订阅（逐过滤器）与每条 PUBLISH 前询问：
 

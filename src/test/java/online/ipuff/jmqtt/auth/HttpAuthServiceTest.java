@@ -28,6 +28,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -62,6 +63,8 @@ class HttpAuthServiceTest {
     @BeforeEach
     void setUp() throws IOException {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        // 线程池执行器: 无熔断用例要求第二个请求在第一个慢处理器睡眠期间就能被处理计数
+        server.setExecutor(Executors.newCachedThreadPool());
         server.createContext("/auth", exchange -> {
             hits.incrementAndGet();
             if (delayMs > 0) {
@@ -92,9 +95,9 @@ class HttpAuthServiceTest {
         }
     }
 
-    private HttpAuthService service(String method, String passwordHash, String onError, long cooldownMs) {
+    private HttpAuthService service(String method, String passwordHash, String onError) {
         HttpAuthProperties properties = new HttpAuthProperties(true, url(method), method,
-                500, 500, passwordHash, onError, cooldownMs, Map.of("X-Trace", "t1"));
+                500, 500, passwordHash, onError, Map.of("X-Trace", "t1"));
         return new HttpAuthService(properties, internal);
     }
 
@@ -114,7 +117,7 @@ class HttpAuthServiceTest {
     @DisplayName("result=allow 放行且默认非 superuser")
     void allowResult() {
         body = "{\"result\":\"allow\"}";
-        AuthResult result = await(service("post", "plain", "reject", 0)
+        AuthResult result = await(service("post", "plain", "reject")
                 .authenticate("c1", "jmqtt", "secret", "10.0.0.1"));
         assertTrue(result.allowed());
         assertFalse(result.superuser());
@@ -129,7 +132,7 @@ class HttpAuthServiceTest {
     @DisplayName("result=allow 且 superuser=true 时授予超级用户")
     void superuserGranted() {
         body = "{\"result\":\"allow\",\"superuser\":true}";
-        AuthResult result = await(service("post", "plain", "reject", 0)
+        AuthResult result = await(service("post", "plain", "reject")
                 .authenticate("c1", "jmqtt", "secret", "10.0.0.1"));
         assertTrue(result.allowed());
         assertTrue(result.superuser());
@@ -139,7 +142,7 @@ class HttpAuthServiceTest {
     @DisplayName("result=deny 拒绝, 不回落")
     void denyResult() {
         body = "{\"result\":\"deny\"}";
-        AuthResult result = await(service("post", "plain", "reject", 0)
+        AuthResult result = await(service("post", "plain", "reject")
                 .authenticate("c1", "jmqtt", "secret", "10.0.0.1"));
         assertFalse(result.allowed());
     }
@@ -148,7 +151,7 @@ class HttpAuthServiceTest {
     @DisplayName("result=ignore 回落到内置静态鉴权: 凭据正确则放行")
     void ignoreFallsBackToInternalAllow() {
         body = "{\"result\":\"ignore\"}";
-        AuthResult result = await(service("post", "plain", "reject", 0)
+        AuthResult result = await(service("post", "plain", "reject")
                 .authenticate("c1", "jmqtt", "jmqtt", "10.0.0.1"));
         assertTrue(result.allowed(), "ignore = 交给认证链下一环(内置 jmqtt/jmqtt)");
     }
@@ -157,16 +160,16 @@ class HttpAuthServiceTest {
     @DisplayName("result=ignore 回落到内置静态鉴权: 凭据错误则拒绝")
     void ignoreFallsBackToInternalDeny() {
         body = "{\"result\":\"ignore\"}";
-        AuthResult result = await(service("post", "plain", "reject", 0)
+        AuthResult result = await(service("post", "plain", "reject")
                 .authenticate("c1", "jmqtt", "wrong", "10.0.0.1"));
         assertFalse(result.allowed());
     }
 
     @Test
-    @DisplayName("认证服务超时: on-error=reject 时拒绝并进入熔断冷却")
-    void timeoutRejectsAndEntersCooldown() {
+    @DisplayName("认证服务超时: on-error=reject 时拒绝, 逐次判定不再熔断短路")
+    void timeoutRejectsPerRequest() {
         delayMs = 5000; // 服务端卡死, 客户端 500ms 超时
-        HttpAuthService svc = service("post", "plain", "reject", 60_000);
+        HttpAuthService svc = service("post", "plain", "reject");
         long start = System.nanoTime();
         AuthResult first = await(svc.authenticate("c1", "jmqtt", "secret", "10.0.0.1"));
         long elapsedMs = (System.nanoTime() - start) / 1_000_000;
@@ -174,12 +177,13 @@ class HttpAuthServiceTest {
         assertTrue(elapsedMs < 2500, "必须按 request-timeout 失败而不是等服务端, 实际 " + elapsedMs + "ms");
         assertEquals(1, hits.get());
 
-        // 冷却期内: 同一实例不再发请求, 立即按策略拒绝
+        // 无熔断: 第二次仍然真发请求、再按超时拒绝
         start = System.nanoTime();
         AuthResult second = await(svc.authenticate("c2", "jmqtt", "secret", "10.0.0.1"));
         elapsedMs = (System.nanoTime() - start) / 1_000_000;
         assertFalse(second.allowed());
-        assertTrue(elapsedMs < 300, "冷却期内必须短路, 实际 " + elapsedMs + "ms");
+        assertTrue(elapsedMs < 2500, "逐次判定, 第二次同样按超时失败, 实际 " + elapsedMs + "ms");
+        assertEquals(2, hits.get(), "无熔断: 每次请求都真发出去");
     }
 
     @Test
@@ -187,7 +191,7 @@ class HttpAuthServiceTest {
     void serverErrorFallsBackWhenConfigured() {
         status = 500;
         body = "boom";
-        AuthResult result = await(service("post", "plain", "ignore", 60_000)
+        AuthResult result = await(service("post", "plain", "ignore")
                 .authenticate("c1", "jmqtt", "jmqtt", "10.0.0.1"));
         assertTrue(result.allowed(), "ignore 策略下认证服务故障回落到内置凭据");
     }
@@ -197,7 +201,7 @@ class HttpAuthServiceTest {
     void serverErrorRejectsByDefault() {
         status = 503;
         body = "";
-        assertFalse(await(service("post", "plain", "reject", 0)
+        assertFalse(await(service("post", "plain", "reject")
                 .authenticate("c1", "jmqtt", "jmqtt", "10.0.0.1")).allowed());
     }
 
@@ -205,7 +209,7 @@ class HttpAuthServiceTest {
     @DisplayName("200 但响应体不是合法 JSON: 按错误处理")
     void malformedBodyTreatedAsError() {
         body = "not-json-at-all";
-        assertFalse(await(service("post", "plain", "reject", 0)
+        assertFalse(await(service("post", "plain", "reject")
                 .authenticate("c1", "jmqtt", "jmqtt", "10.0.0.1")).allowed());
     }
 
@@ -213,7 +217,7 @@ class HttpAuthServiceTest {
     @DisplayName("未知 result 值: 按错误处理而不是放行")
     void unknownResultTreatedAsError() {
         body = "{\"result\":\"maybe\"}";
-        assertFalse(await(service("post", "plain", "reject", 0)
+        assertFalse(await(service("post", "plain", "reject")
                 .authenticate("c1", "jmqtt", "jmqtt", "10.0.0.1")).allowed());
     }
 
@@ -221,7 +225,7 @@ class HttpAuthServiceTest {
     @DisplayName("password-hash=sha256: 请求体里是摘要而不是明文")
     void sha256PasswordHashSent() {
         body = "{\"result\":\"allow\"}";
-        await(service("post", "sha256", "reject", 0)
+        await(service("post", "sha256", "reject")
                 .authenticate("c1", "jmqtt", "secret", "10.0.0.1"));
         String expected = AuthService.sha256Hex("secret");
         assertTrue(lastRequestBody.contains(expected), "应传 sha256 摘要: " + lastRequestBody);
@@ -232,7 +236,7 @@ class HttpAuthServiceTest {
     @DisplayName("GET 方式: 凭据走查询参数")
     void getMethodUsesQueryParams() {
         body = "{\"result\":\"allow\"}";
-        await(service("get", "plain", "reject", 0)
+        await(service("get", "plain", "reject")
                 .authenticate("c1", "jmqtt", "secret", "10.0.0.1"));
         assertTrue(lastRequestQuery.contains("username=jmqtt"), "查询参数: " + lastRequestQuery);
         assertTrue(lastRequestQuery.contains("password=secret"));
@@ -240,22 +244,21 @@ class HttpAuthServiceTest {
     }
 
     @Test
-    @DisplayName("认证服务不可达: 冷却期内短路, on-error=ignore 回落内置")
-    void unreachableEntersCooldown() {
+    @DisplayName("认证服务 5xx: 每次都真发请求, on-error=ignore 逐次回落内置")
+    void serverErrorPerRequest() {
         status = 500;
-        HttpAuthService svc = service("post", "plain", "ignore", 60_000);
+        HttpAuthService svc = service("post", "plain", "ignore");
         assertTrue(await(svc.authenticate("c1", "jmqtt", "jmqtt", "10.0.0.1")).allowed());
         assertEquals(1, hits.get());
-        // 冷却期内第二次: 不打服务端
         assertTrue(await(svc.authenticate("c2", "jmqtt", "jmqtt", "10.0.0.1")).allowed());
-        assertEquals(1, hits.get(), "冷却期内不得再发请求");
+        assertEquals(2, hits.get(), "无熔断: 第二次仍真发请求");
     }
 
     @Test
     @DisplayName("enabled=true 但 url 为空: 构造即失败(fail-fast)")
     void blankUrlFailsFast() {
         HttpAuthProperties bad = new HttpAuthProperties(true, "", "post",
-                500, 500, "plain", "reject", 0, Map.of());
+                500, 500, "plain", "reject", Map.of());
         org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
                 () -> new HttpAuthService(bad, internal));
     }

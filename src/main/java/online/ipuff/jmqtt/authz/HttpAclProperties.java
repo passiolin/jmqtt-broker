@@ -42,7 +42,6 @@ import java.util.Map;
  *                                  防止一个订阅了几千个主题的客户端把缓存撑爆
  * @param onFail                    {@code ignore} 结果与故障(超时/不可达/响应不合法)
  *                                  时的策略: {@code deny}(默认 fail-closed)或 {@code allow}
- * @param cooldownMs                熔断冷却: 故障期间不发请求直接按 on-fail 结束
  * @param headers                   附加请求头
  */
 @ConfigurationProperties(prefix = "jmqtt.broker.http-acl")
@@ -55,7 +54,6 @@ public record HttpAclProperties(
         @DefaultValue("60") @Min(0) long cacheTtlSeconds,
         @DefaultValue("32") @Min(1) int cacheMaxEntriesPerClient,
         @DefaultValue("deny") String onFail,
-        @DefaultValue("5000") @Min(0) long cooldownMs,
         Map<String, String> headers
 ) {
 

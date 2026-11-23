@@ -74,9 +74,9 @@ class HttpAclServiceTest {
         }
     }
 
-    private HttpAclService service(long cacheTtlSeconds, int cacheMaxEntries, String onFail, long cooldownMs) {
+    private HttpAclService service(long cacheTtlSeconds, int cacheMaxEntries, String onFail) {
         HttpAclProperties properties = new HttpAclProperties(true, url(), "post",
-                500, 500, cacheTtlSeconds, cacheMaxEntries, onFail, cooldownMs, Map.of());
+                500, 500, cacheTtlSeconds, cacheMaxEntries, onFail, Map.of());
         return new HttpAclService(properties);
     }
 
@@ -96,7 +96,7 @@ class HttpAclServiceTest {
     @Test
     @DisplayName("allow 放行, 请求体携带 EMQX 契约字段")
     void allowCarriesContractFields() {
-        assertTrue(allow(service(60, 32, "deny", 0), "c1", "publish", "a/b"));
+        assertTrue(allow(service(60, 32, "deny"), "c1", "publish", "a/b"));
         assertEquals(1, hits.get());
         assertTrue(lastRequestBody.contains("\"clientid\":\"c1\""), lastRequestBody);
         assertTrue(lastRequestBody.contains("\"action\":\"publish\""), lastRequestBody);
@@ -109,13 +109,13 @@ class HttpAclServiceTest {
     @DisplayName("deny 拒绝")
     void denyRejected() {
         body = "{\"result\":\"deny\"}";
-        assertFalse(allow(service(60, 32, "deny", 0), "c1", "subscribe", "a/#"));
+        assertFalse(allow(service(60, 32, "deny"), "c1", "subscribe", "a/#"));
     }
 
     @Test
     @DisplayName("缓存命中不再发请求(action/topic 分别缓存)")
     void cacheHitAvoidsHttpRequest() {
-        HttpAclService service = service(60, 32, "deny", 0);
+        HttpAclService service = service(60, 32, "deny");
         allow(service, "c1", "publish", "a/b");
         allow(service, "c1", "publish", "a/b");
         allow(service, "c1", "publish", "a/b");
@@ -129,7 +129,7 @@ class HttpAclServiceTest {
     @Test
     @DisplayName("TTL 过期后重新询问")
     void ttlExpiryRequeries() {
-        HttpAclService service = service(0, 32, "deny", 0); // ttl=0 表示不缓存
+        HttpAclService service = service(0, 32, "deny"); // ttl=0 表示不缓存
         allow(service, "c1", "publish", "a/b");
         allow(service, "c1", "publish", "a/b");
         assertEquals(2, hits.get(), "ttl=0 时每次都要问");
@@ -138,7 +138,7 @@ class HttpAclServiceTest {
     @Test
     @DisplayName("单客户端缓存条目上限: 挤出最旧的(LRU)")
     void perClientLruEviction() {
-        HttpAclService service = service(60, 2, "deny", 0);
+        HttpAclService service = service(60, 2, "deny");
         allow(service, "c1", "publish", "t1");       // [t1]
         allow(service, "c1", "publish", "t2");       // [t1, t2]
         allow(service, "c1", "publish", "t3");       // 超上限, 挤出 t1 → [t2, t3]
@@ -154,7 +154,7 @@ class HttpAclServiceTest {
     @Test
     @DisplayName("断连清理: 客户端下线后缓存条目释放")
     void clientOfflineEvictsCache() {
-        HttpAclService service = service(60, 32, "deny", 0);
+        HttpAclService service = service(60, 32, "deny");
         allow(service, "c1", "publish", "a/b");
         service.onClientOffline("c1");
         allow(service, "c1", "publish", "a/b");
@@ -165,37 +165,33 @@ class HttpAclServiceTest {
     @DisplayName("result=ignore 按 on-fail 策略: 默认 deny")
     void ignoreFollowsOnFailDeny() {
         body = "{\"result\":\"ignore\"}";
-        assertFalse(allow(service(60, 32, "deny", 0), "c1", "publish", "a/b"));
+        assertFalse(allow(service(60, 32, "deny"), "c1", "publish", "a/b"));
     }
 
     @Test
     @DisplayName("result=ignore 按 on-fail 策略: 可配 allow")
     void ignoreFollowsOnFailAllow() {
         body = "{\"result\":\"ignore\"}";
-        assertTrue(allow(service(60, 32, "allow", 0), "c1", "publish", "a/b"));
+        assertTrue(allow(service(60, 32, "allow"), "c1", "publish", "a/b"));
     }
 
     @Test
-    @DisplayName("ACL 服务 5xx: on-fail=deny 拒绝且进入熔断冷却")
-    void serverErrorDeniesAndCooldowns() {
+    @DisplayName("ACL 服务 5xx: on-fail=deny 逐次拒绝, 无熔断短路")
+    void serverErrorDeniesPerRequest() {
         status = 500;
-        HttpAclService service = service(60, 32, "deny", 60_000);
-        long start = System.nanoTime();
+        HttpAclService service = service(60, 32, "deny");
         assertFalse(allow(service, "c1", "publish", "a/b"));
         assertEquals(1, hits.get());
 
-        start = System.nanoTime();
-        assertFalse(allow(service, "c1", "publish", "x/y"), "冷却期内直接按策略拒绝");
-        long elapsed = (System.nanoTime() - start) / 1_000_000;
-        assertEquals(1, hits.get(), "冷却期内不得再发请求");
-        assertTrue(elapsed < 300, "冷却期内必须短路, 实际 " + elapsed + "ms");
+        assertFalse(allow(service, "c1", "publish", "x/y"));
+        assertEquals(2, hits.get(), "无熔断: 每次都真发请求、逐次按策略拒绝");
     }
 
     @Test
     @DisplayName("故障期间的决策不进缓存(服务恢复后重新判定)")
     void failureDecisionsNotCached() {
         status = 500;
-        HttpAclService service = service(60, 32, "deny", 0); // 不冷却, 便于观察
+        HttpAclService service = service(60, 32, "deny");
         assertFalse(allow(service, "c1", "publish", "a/b"));
         status = 200;
         body = "{\"result\":\"allow\"}";
@@ -206,7 +202,7 @@ class HttpAclServiceTest {
     @DisplayName("enabled=false 时恒为 allow(零外部行为)")
     void disabledAlwaysAllows() {
         HttpAclProperties properties = new HttpAclProperties(false, null, "post",
-                500, 500, 60, 32, "deny", 0, Map.of());
+                500, 500, 60, 32, "deny", Map.of());
         HttpAclService service = new HttpAclService(properties);
         CompletableFuture<Boolean> future =
                 service.check("c1", "user", "10.0.0.1", "publish", "a/b");
@@ -223,7 +219,7 @@ class HttpAclServiceTest {
     @DisplayName("enabled=true 但 url 为空: 构造即失败(fail-fast)")
     void blankUrlFailsFast() {
         HttpAclProperties bad = new HttpAclProperties(true, " ", "post",
-                500, 500, 60, 32, "deny", 0, Map.of());
+                500, 500, 60, 32, "deny", Map.of());
         org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
                 () -> new HttpAclService(bad));
     }

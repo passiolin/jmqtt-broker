@@ -73,7 +73,7 @@ jmqtt:
     #   响应  {"result":"allow"|"deny"|"ignore", "superuser":true?}
     # ignore/故障(on-error=ignore)回落到上面的内置静态鉴权 —— 即认证链 [http, 内置]。
     # superuser=true 的连接后续跳过全部 ACL 检查。
-    # 认证是连接建立路径, request-timeout 必须设小; 故障后进入 cooldown 熔断
+    # 认证是连接建立路径, request-timeout 必须设小
     http-auth:
       enabled: false
       # url: http://auth-center:8080/mqtt/auth
@@ -83,8 +83,8 @@ jmqtt:
       # plain = 明文(认证服务侧可用任意算法校验) / sha256 = 摘要, 明文不出 broker
       password-hash: plain
       # 故障策略: reject(默认 fail-closed) / ignore(回落内置静态鉴权)
+      # 故障逐次判定, 无全局熔断(EMQX 同款)
       on-error: reject
-      cooldown-ms: 5000
 
     # HTTP ACL 授权(EMQX 契约)。开启后每次订阅(逐过滤器)/每条 PUBLISH 前询问:
     #   请求  {"clientid","username","peerhost","action":"publish|subscribe","topic"}
@@ -101,7 +101,6 @@ jmqtt:
       cache-max-entries-per-client: 32
       # ignore 与故障的策略: deny(默认 fail-closed) / allow
       on-fail: deny
-      cooldown-ms: 5000
 
     # 会话
     # 默认心跳时间(秒), 会被客户端 CONNECT 参数覆盖

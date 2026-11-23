@@ -33,7 +33,7 @@ import java.util.Map;
  * @param method           post(推荐, 凭据在 body)或 get(凭据走查询参数 ——
  *                         会进对端访问日志, 仅在认证服务只支持 GET 时使用)
  * @param requestTimeoutMs 单次请求超时。在连接建立路径上, 必须设小;
- *                         超时按 on-error 处理并触发熔断冷却
+ *                         超时按 on-error 处理
  * @param connectTimeoutMs TCP 连接超时
  * @param passwordHash     发给认证服务的密码形态: {@code plain}(明文, 认证服务侧才能
  *                         用任意算法校验)或 {@code sha256}(摘要, 明文不出 broker;
@@ -42,8 +42,6 @@ import java.util.Map;
  *                         {@code reject}(默认, fail-closed)或
  *                         {@code ignore}(回落到内置静态鉴权 —— 注意这意味着认证中心
  *                         故障期间仅靠 auth-username/auth-password 把门)
- * @param cooldownMs       熔断冷却时长: 一次失败后在此期间不再发请求, 直接按 on-error
- *                         处理。防止认证中心故障时每个 CONNECT 都吃满超时
  * @param headers          附加请求头(如认证服务要求的固定 Authorization)
  */
 @ConfigurationProperties(prefix = "jmqtt.broker.http-auth")
@@ -55,7 +53,6 @@ public record HttpAuthProperties(
         @DefaultValue("2000") @Min(100) int connectTimeoutMs,
         @DefaultValue("plain") String passwordHash,
         @DefaultValue("reject") String onError,
-        @DefaultValue("5000") @Min(0) long cooldownMs,
         Map<String, String> headers
 ) {
 

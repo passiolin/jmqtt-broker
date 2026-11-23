@@ -28,7 +28,6 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * HTTP 认证服务(EMQX 5.x HTTP authenticator 契约)。
@@ -41,9 +40,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * 都回落到构造时传入的下一环(内置静态鉴权)—— 与 EMQX 认证器链的 ignore 语义一致:
  * 「本认证器不管这件事, 交给下一个」。
  *
- * <p><b>熔断冷却</b>: 一次传输层失败(超时/IO/非 200/坏响应)后进入 cooldown-ms 冷却期,
- * 期间不再发请求、直接按 on-error 结束 —— 认证中心故障不该让每个 CONNECT 都吃满超时。
- * 任何一次成功响应(含 deny —— deny 是明确决策, 不是故障)都会结束冷却。
+ * <p><b>无熔断</b>: 传输层失败(超时/IO/非 200/坏响应)逐次判定, 每次按 on-error 结束,
+ * 与 EMQX 行为一致 —— 不做全局冷却。部分按本契约实现的认证中心会把 deny 判决
+ * 表达为 4xx(如 403 + {"result":"deny"}), 若把状态码当健康信号做熔断,
+ * 一次正常拒绝会连坐冷却窗口内的所有连接。
  *
  * <p>future 永不异常完成: 任何意外都收敛为 deny / 回落, 认证路径上没有「炸出去」的路径。
  */
@@ -55,8 +55,6 @@ public class HttpAuthService implements IAuthService {
     private final IAuthService fallback;
     private final HttpClient httpClient;
     private final ObjectMapper mapper = new ObjectMapper();
-    /** 熔断冷却截止时刻(epoch millis); 0 表示不在冷却期 */
-    private final AtomicLong cooldownUntil = new AtomicLong();
 
     public HttpAuthService(HttpAuthProperties properties, IAuthService fallback) {
         if (properties.url() == null || properties.url().isBlank()) {
@@ -74,13 +72,6 @@ public class HttpAuthService implements IAuthService {
     @Override
     public CompletableFuture<AuthResult> authenticate(String clientId, String username,
                                                       String password, String peerhost) {
-        long now = System.currentTimeMillis();
-        long until = cooldownUntil.get();
-        if (until > now) {
-            log.debug("认证服务冷却期中(剩余 {}ms), 按 on-error={} 处理", until - now, properties.onError());
-            return onFallback(username, password);
-        }
-
         String sentPassword = "sha256".equalsIgnoreCase(properties.passwordHash()) && password != null
                 ? AuthService.sha256Hex(password)
                 : password;
@@ -93,9 +84,8 @@ public class HttpAuthService implements IAuthService {
                 .orTimeout(properties.requestTimeoutMs(), java.util.concurrent.TimeUnit.MILLISECONDS)
                 .thenApply(response -> parse(response, clientId, username, password))
                 .exceptionally(e -> {
-                    enterCooldown(now);
-                    log.warn("认证服务请求失败(进入 {}ms 冷却): {}",
-                            properties.cooldownMs(), e.getMessage());
+                    log.warn("认证服务请求失败, 按 on-error={} 处理: {}",
+                            properties.onError(), e.getMessage());
                     return join(onFallback(username, password));
                 });
     }
@@ -138,7 +128,7 @@ public class HttpAuthService implements IAuthService {
     }
 
     /**
-     * 解析认证服务响应。非 200 / 坏 JSON / 未知 result 都按故障处理(熔断 + on-error)。
+     * 解析认证服务响应。非 200 / 坏 JSON / 未知 result 都按故障处理(on-error)。
      */
     private AuthResult parse(HttpResponse<String> response, String clientId,
                              String username, String password) {
@@ -155,10 +145,8 @@ public class HttpAuthService implements IAuthService {
         boolean superuser = root.path("superuser").asBoolean(false);
         switch (result) {
             case "allow":
-                cooldownUntil.set(0);
                 return new AuthResult(true, superuser);
             case "deny":
-                cooldownUntil.set(0);
                 return AuthResult.DENY;
             case "ignore":
                 // ignore 是认证链语义(本认证器不管, 交给下一环), 与 on-error 策略无关
@@ -169,8 +157,7 @@ public class HttpAuthService implements IAuthService {
     }
 
     private AuthResult transportFailure(String reason, String username, String password) {
-        enterCooldown(System.currentTimeMillis());
-        log.warn("{}(进入 {}ms 冷却)", reason, properties.cooldownMs());
+        log.warn("{}, 按 on-error={} 处理", reason, properties.onError());
         return join(onFallback(username, password));
     }
 
@@ -191,12 +178,6 @@ public class HttpAuthService implements IAuthService {
             return CompletableFuture.completedFuture(AuthResult.DENY);
         }
         return chainFallthrough(username, password);
-    }
-
-    private void enterCooldown(long fromMs) {
-        if (properties.cooldownMs() > 0) {
-            cooldownUntil.set(fromMs + properties.cooldownMs());
-        }
     }
 
     private static String nullSafe(String s) {

@@ -33,7 +33,6 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * HTTP ACL 服务(EMQX 5.x HTTP authorization 契约)。
@@ -59,8 +58,6 @@ public class HttpAclService implements IAclService {
     private final ObjectMapper mapper = new ObjectMapper();
     /** clientId → 该客户端的决策缓存; 断连时整体移除 */
     private final ConcurrentHashMap<String, ClientCache> caches = new ConcurrentHashMap<>();
-    /** 熔断冷却截止时刻(epoch millis); 0 表示不在冷却期 */
-    private final AtomicLong cooldownUntil = new AtomicLong();
 
     public HttpAclService(HttpAclProperties properties) {
         if (properties.enabled() && (properties.url() == null || properties.url().isBlank())) {
@@ -96,20 +93,12 @@ public class HttpAclService implements IAclService {
             }
         }
 
-        long now = System.currentTimeMillis();
-        long until = cooldownUntil.get();
-        if (until > now) {
-            log.debug("ACL 服务冷却期中(剩余 {}ms), 按 on-fail={} 处理", until - now, properties.onFail());
-            return CompletableFuture.completedFuture(failOpen());
-        }
-
         HttpRequest request = buildRequest(clientId, username, peerhost, action, topic);
         return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
                 .orTimeout(properties.requestTimeoutMs(), TimeUnit.MILLISECONDS)
                 .thenApply(response -> parse(response, clientId, cacheKey))
                 .exceptionally(e -> {
-                    enterCooldown(now);
-                    log.warn("ACL 服务请求失败(进入 {}ms 冷却): {}", properties.cooldownMs(), e.getMessage());
+                    log.warn("ACL 服务请求失败, 按 on-fail={} 处理: {}", properties.onFail(), e.getMessage());
                     return failOpen(); // 故障决策不进缓存
                 });
     }
@@ -172,11 +161,9 @@ public class HttpAclService implements IAclService {
         String result = root.path("result").asText("");
         switch (result) {
             case "allow":
-                cooldownUntil.set(0);
                 cacheDecision(clientId, cacheKey, true);
                 return true;
             case "deny":
-                cooldownUntil.set(0);
                 cacheDecision(clientId, cacheKey, false);
                 return false;
             case "ignore":
@@ -188,8 +175,7 @@ public class HttpAclService implements IAclService {
     }
 
     private boolean transportFailure(String reason) {
-        enterCooldown(System.currentTimeMillis());
-        log.warn("{}(进入 {}ms 冷却)", reason, properties.cooldownMs());
+        log.warn("{}, 按 on-fail={} 处理", reason, properties.onFail());
         return failOpen();
     }
 
@@ -199,12 +185,6 @@ public class HttpAclService implements IAclService {
         }
         caches.computeIfAbsent(clientId, c -> new ClientCache(properties.cacheMaxEntriesPerClient()))
                 .put(cacheKey, allowed, System.currentTimeMillis() + properties.cacheTtlSeconds() * 1000);
-    }
-
-    private void enterCooldown(long fromMs) {
-        if (properties.cooldownMs() > 0) {
-            cooldownUntil.set(fromMs + properties.cooldownMs());
-        }
     }
 
     private boolean failOpen() {
